@@ -2,6 +2,7 @@ package com.harnkan.deal.service;
 
 import java.time.LocalDateTime;
 
+import org.springframework.amqp.AmqpException;
 import org.springframework.stereotype.Service;
 
 import com.harnkan.deal.client.PaymentServiceClient;
@@ -13,6 +14,7 @@ import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.exception.DealValidationException;
 import com.harnkan.deal.exception.PaymentServiceException;
 import com.harnkan.deal.grpc.payment.CreatePaymentResponse;
+import com.harnkan.deal.messaging.DealEventPublisher;
 import com.harnkan.deal.repository.DealRepository;
 
 import lombok.RequiredArgsConstructor;
@@ -25,6 +27,7 @@ public class DealService {
 
     private final DealRepository dealRepository;
     private final PaymentServiceClient paymentServiceClient;
+    private final DealEventPublisher dealEventPublisher;
 
     public Deal createDeal(CreateDealCommand cmd) {
         requireNonBlank(cmd.getCreatorId(), "creator_id");
@@ -56,7 +59,16 @@ public class DealService {
                 .status(DealStatus.ACTIVE)
                 .build();
 
-        return dealRepository.save(deal);
+        deal = dealRepository.save(deal);
+
+        // Best-effort: the deal is already saved, so a broker outage must not fail the request.
+        try {
+            dealEventPublisher.publishDealCreated(deal);
+        } catch (AmqpException e) {
+            log.warn("Publishing deal.created failed for deal {}: {}", deal.getId(), e.getMessage());
+        }
+
+        return deal;
     }
 
     public Deal getDeal(String dealId) {

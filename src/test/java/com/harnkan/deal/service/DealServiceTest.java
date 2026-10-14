@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.amqp.AmqpConnectException;
 
 import com.harnkan.deal.client.PaymentServiceClient;
 import com.harnkan.deal.domain.Deal;
@@ -29,6 +31,7 @@ import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.exception.DealValidationException;
 import com.harnkan.deal.grpc.payment.CreatePaymentResponse;
 import com.harnkan.deal.grpc.payment.RefundDealResponse;
+import com.harnkan.deal.messaging.DealEventPublisher;
 import com.harnkan.deal.repository.DealRepository;
 
 /**
@@ -45,11 +48,14 @@ class DealServiceTest {
     @Mock
     private PaymentServiceClient paymentServiceClient;
 
+    @Mock
+    private DealEventPublisher dealEventPublisher;
+
     private DealService dealService;
 
     @BeforeEach
     void setUp() {
-        dealService = new DealService(dealRepository, paymentServiceClient);
+        dealService = new DealService(dealRepository, paymentServiceClient, dealEventPublisher);
     }
 
     @Test
@@ -75,6 +81,45 @@ class DealServiceTest {
         assertThat(deal.getId()).isEqualTo("generated-id");
         assertThat(deal.getStatus()).isEqualTo(DealStatus.ACTIVE);
         assertThat(deal.getJoinedSlots()).isZero();
+        verify(dealEventPublisher).publishDealCreated(deal);
+    }
+
+    @Test
+    void createDeal_stillSucceedsWhenBrokerIsDown() {
+        when(dealRepository.save(any())).thenAnswer(invocation -> {
+            Deal d = invocation.getArgument(0);
+            d.setId("generated-id");
+            return d;
+        });
+        doThrow(new AmqpConnectException(new java.net.ConnectException("Connection refused")))
+                .when(dealEventPublisher).publishDealCreated(any());
+
+        Deal deal = dealService.createDeal(validCreateCommand());
+
+        assertThat(deal.getId()).isEqualTo("generated-id");
+        assertThat(deal.getStatus()).isEqualTo(DealStatus.ACTIVE);
+    }
+
+    @Test
+    void createDeal_doesNotPublishWhenValidationFails() {
+        CreateDealCommand invalid = CreateDealCommand.builder().creatorId("creator-1").build();
+
+        assertThatThrownBy(() -> dealService.createDeal(invalid)).isInstanceOf(DealValidationException.class);
+        verify(dealEventPublisher, never()).publishDealCreated(any());
+    }
+
+    private static CreateDealCommand validCreateCommand() {
+        return CreateDealCommand.builder()
+                .creatorId("creator-1")
+                .shopName("Coffee Corner")
+                .promotionDetail("Buy 1 Get 1")
+                .category("DRINK")
+                .pricePerSlot(new BigDecimal("49.00"))
+                .targetSlots(3)
+                .latitude(new BigDecimal("13.75630000"))
+                .longitude(new BigDecimal("100.50180000"))
+                .expiresAt(LocalDateTime.now().plusHours(1))
+                .build();
     }
 
     @Test

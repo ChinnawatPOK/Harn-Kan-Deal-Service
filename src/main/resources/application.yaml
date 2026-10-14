@@ -21,6 +21,14 @@ spring:
     init:
       mode: always
 
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:harnkan}
+    password: ${RABBITMQ_PASSWORD:harnkan}
+    # create-deal publishes synchronously; fail fast instead of hanging if the broker is down
+    connection-timeout: 2s
+
 server:
   port: 8081
 

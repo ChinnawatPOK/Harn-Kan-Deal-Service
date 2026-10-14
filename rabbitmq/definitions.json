@@ -1,0 +1,46 @@
+{
+  "users": [
+    {
+      "name": "harnkan",
+      "password_hash": "obLD1EHWDd0Q8+Pgw1MBDsPmy5x6qJHSyfjFI2nM853DK9i/",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    { "name": "/" }
+  ],
+  "permissions": [
+    { "user": "harnkan", "vhost": "/", "configure": ".*", "write": ".*", "read": ".*" }
+  ],
+  "exchanges": [
+    {
+      "name": "harnkan.events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "audit.deal-created",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": { "x-max-length": 100 }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "harnkan.events",
+      "vhost": "/",
+      "destination": "audit.deal-created",
+      "destination_type": "queue",
+      "routing_key": "deal.created",
+      "arguments": {}
+    }
+  ]
+}
