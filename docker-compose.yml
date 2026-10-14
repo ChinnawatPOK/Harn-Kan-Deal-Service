@@ -1,0 +1,40 @@
+services:
+
+  deal-service:
+    build: .
+    container_name: harnkan-deal-service
+    ports:
+      - "8080:8080"   # REST: DR2 create, DR4 get, DR7 join, DR6 cancel
+      - "9090:9090"   # gRPC: DG1-DG6
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/harnkan_deal?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: password
+      PAYMENT_SERVICE_HOST: host.docker.internal
+      PAYMENT_SERVICE_PORT: 9091
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    container_name: harnkan-deal-db
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: harnkan-deal
+      TZ: Asia/Bangkok
+    command: --default-time-zone='+07:00'
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:
