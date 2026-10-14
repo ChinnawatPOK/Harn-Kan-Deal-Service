@@ -1,3 +1,36 @@
 spring:
   application:
     name: deal
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+    username: root
+    password: password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      # schema.sql is the source of truth (final agreed DDL) — Hibernate must not auto-generate DDL
+      ddl-auto: none
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  sql:
+    init:
+      mode: always
+
+server:
+  port: 8081
+
+# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, ConfirmSlot, ReleaseSlot)
+grpc:
+  server:
+    port: 9090
+
+# gRPC client
+payment:
+  service:
+    host: localhost
+    port: 9091
