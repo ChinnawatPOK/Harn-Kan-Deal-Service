@@ -1,4 +1,3 @@
-
 CREATE TABLE IF NOT EXISTS deals (
     id VARCHAR(32) PRIMARY KEY,
     creator_id VARCHAR(32) NOT NULL,

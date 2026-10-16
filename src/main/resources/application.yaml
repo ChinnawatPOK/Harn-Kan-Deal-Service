@@ -10,7 +10,7 @@ spring:
 
   jpa:
     hibernate:
-      # schema.sql is the source of truth (final agreed DDL) — Hibernate must not auto-generate DDL
+      # Flyway owns schema changes; Hibernate must not generate DDL.
       ddl-auto: none
     show-sql: true
     properties:
@@ -19,7 +19,11 @@ spring:
 
   sql:
     init:
-      mode: always
+      mode: never
+
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
 
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
@@ -31,6 +35,9 @@ spring:
 
 server:
   port: 8081
+
+deal:
+  jwt-secret: 9768318c34e318158c87bfb9004a71fbcb9badb1056f74b011d485e27bb4e9a8
 
 # gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, ConfirmSlot, ReleaseSlot)
 grpc:
