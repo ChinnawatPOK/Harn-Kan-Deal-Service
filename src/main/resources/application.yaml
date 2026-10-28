@@ -1,3 +1,51 @@
 spring:
   application:
     name: deal
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+    username: root
+    password: password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      # Flyway owns schema changes; Hibernate must not generate DDL.
+      ddl-auto: none
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  sql:
+    init:
+      mode: never
+
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:harnkan}
+    password: ${RABBITMQ_PASSWORD:harnkan}
+    # create-deal publishes synchronously; fail fast instead of hanging if the broker is down
+    connection-timeout: 2s
+
+server:
+  port: 8081
+
+deal:
+  jwt-secret: 9768318c34e318158c87bfb9004a71fbcb9badb1056f74b011d485e27bb4e9a8
+
+# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, ConfirmSlot, ReleaseSlot)
+grpc:
+  server:
+    port: 9090
+
+# gRPC client
+payment:
+  service:
+    host: localhost
+    port: 9091

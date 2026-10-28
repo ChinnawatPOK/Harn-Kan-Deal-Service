@@ -1,0 +1,68 @@
+services:
+
+  deal-service:
+    build: .
+    container_name: harnkan-deal-service
+    ports:
+      - "8081:8081"   # REST: DR2 create, DR4 get, DR7 join, DR6 cancel
+      - "9090:9090"   # gRPC: DG1-DG6
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: password
+      PAYMENT_SERVICE_HOST: host.docker.internal
+      PAYMENT_SERVICE_PORT: 9091
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: harnkan
+      RABBITMQ_PASSWORD: harnkan
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    container_name: harnkan-deal-db
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: deals
+      TZ: Asia/Bangkok
+    command: --default-time-zone='+07:00'
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Message broker shared with Notification Service (exchange harnkan.events).
+  # Management UI: http://localhost:15672 (harnkan / harnkan)
+  # rabbitmq/definitions.json is loaded on every start: user harnkan, exchange harnkan.events,
+  # and queue audit.deal-created (bound to deal.created) so published events can be viewed in the UI.
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: harnkan-rabbitmq
+    hostname: harnkan-rabbitmq   # data dir is keyed by node name; keep it stable across recreates
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-harnkan.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:
+  rabbitmq_data:

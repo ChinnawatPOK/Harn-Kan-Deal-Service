@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package harnkan.deal;
+
+option java_package = "com.harnkan.deal.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "DealProto";
+
+service DealService {
+  rpc CreateDeal(CreateDealRequest) returns (DealResponse);
+
+  rpc GetDeal(GetDealRequest) returns (DealResponse);
+
+  rpc CancelDeal(CancelDealRequest) returns (DealResponse);
+
+  rpc ConfirmSlot(ConfirmSlotRequest) returns (DealResponse);
+
+  rpc ReleaseSlot(ReleaseSlotRequest) returns (DealResponse);
+}
+
+message Deal {
+  string id = 1;
+  string creator_id = 2;
+  string shop_name = 3;
+  string promotion_detail = 4;
+  string category = 5;
+  string menu_image_url = 6;
+  string price_per_slot = 7;   // decimal amount as string, avoids float precision loss
+  int32 target_slots = 8;      // total people required, creator included
+  int32 joined_slots = 9;      // slots currently confirmed/in use
+  double latitude = 10;
+  double longitude = 11;
+  string expires_at = 12;
+  string status = 13;          // ACTIVE | LOCKED | PURCHASED | COMPLETED | CANCELLED | EXPIRED
+  string created_at = 14;      // ISO-8601 UTC
+  string updated_at = 15;      // ISO-8601 UTC
+}
+
+message CreateDealRequest {
+  string creator_id = 1;
+  string shop_name = 2;
+  string promotion_detail = 3;
+  string category = 4;
+  string menu_image_url = 5;
+  string price_per_slot = 6;
+  int32 target_slots = 7;
+  double latitude = 8;
+  double longitude = 9;
+  string expires_at = 10; // ISO-8601 UTC
+}
+
+message GetDealRequest {
+  string deal_id = 1;
+}
+
+message CancelDealRequest {
+  string deal_id = 1;
+  string requester_id = 2; // must equal Deal.creator_id
+}
+
+message ConfirmSlotRequest {
+  string deal_id = 1;
+  string participant_id = 2; // logical reference to users._id, for logging/idempotency only
+}
+
+message ReleaseSlotRequest {
+  string deal_id = 1;
+  string participant_id = 2; // logical reference to users._id, for logging/idempotency only
+}
+
+message DealResponse {
+  Deal deal = 1;
+}
