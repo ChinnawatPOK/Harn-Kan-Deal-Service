@@ -39,8 +39,6 @@ spring:
 server:
   port: 8081
 
-# gateway: trust X-User-Id / X-User-Name from the API gateway (default)
-# jwt:     verify the bearer token here with JWT_SECRET (direct calls while developing)
 auth:
   mode: ${AUTH_MODE:gateway}
 
@@ -50,7 +48,6 @@ deal:
     enabled: true
     interval-ms: 30000
 
-# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, UpdateParticipantPayment)
 grpc:
   server:
     port: 9090
@@ -60,5 +57,4 @@ payment:
   service:
     host: ${PAYMENT_SERVICE_HOST:localhost}
     port: ${PAYMENT_SERVICE_PORT:9091}
-    # zone of Payment's JVM, used to read its zone-less reserved_until
     timezone: ${PAYMENT_SERVICE_TIMEZONE:UTC}
