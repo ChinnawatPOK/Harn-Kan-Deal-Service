@@ -2,9 +2,8 @@ package com.harnkan.deal.grpc;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.function.Supplier;
 
 import org.springframework.stereotype.Component;
 
@@ -12,6 +11,7 @@ import com.harnkan.deal.exception.DealNotFoundException;
 import com.harnkan.deal.exception.DealPermissionException;
 import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.exception.DealValidationException;
+import com.harnkan.deal.exception.ParticipantNotFoundException;
 import com.harnkan.deal.service.CreateDealCommand;
 import com.harnkan.deal.service.DealService;
 
@@ -27,50 +27,52 @@ public class DealGrpcService extends DealServiceGrpc.DealServiceImplBase {
 
     @Override
     public void createDeal(CreateDealRequest request, StreamObserver<DealResponse> responseObserver) {
-        run(responseObserver, () -> dealService.createDeal(CreateDealCommand.builder()
+        reply(responseObserver, () -> toResponse(dealService.createDeal(CreateDealCommand.builder()
                 .creatorId(request.getCreatorId())
-                .shopName(request.getShopName())
-                .promotionDetail(request.getPromotionDetail())
+                .creatorName(request.getCreatorName())
+                .dealName(request.getDealName())
+                .details(request.getDetails().isBlank() ? null : request.getDetails())
                 .category(request.getCategory())
                 .menuImageUrl(request.getMenuImageUrl().isBlank() ? null : request.getMenuImageUrl())
-                .pricePerSlot(parseDecimal(request.getPricePerSlot(), "price_per_slot"))
+                .pickupLocation(request.getPickupLocation())
+                .totalPrice(parseDecimal(request.getTotalPrice(), "total_price"))
                 .targetSlots(request.getTargetSlots())
                 .latitude(BigDecimal.valueOf(request.getLatitude()))
                 .longitude(BigDecimal.valueOf(request.getLongitude()))
                 .expiresAt(parseIsoUtc(request.getExpiresAt(), "expires_at"))
-                .build()));
+                .build())));
     }
 
     @Override
     public void getDeal(GetDealRequest request, StreamObserver<DealResponse> responseObserver) {
-        run(responseObserver, () -> dealService.getDeal(request.getDealId()));
+        reply(responseObserver, () -> toResponse(dealService.getDeal(request.getDealId())));
     }
 
     @Override
     public void cancelDeal(CancelDealRequest request, StreamObserver<DealResponse> responseObserver) {
-        run(responseObserver, () -> dealService.cancelDeal(request.getDealId(), request.getRequesterId()));
+        reply(responseObserver,
+                () -> toResponse(dealService.cancelDeal(request.getDealId(), request.getRequesterId())));
     }
 
     @Override
-    public void confirmSlot(ConfirmSlotRequest request, StreamObserver<DealResponse> responseObserver) {
-        run(responseObserver, () -> dealService.confirmSlot(request.getDealId()));
-    }
-
-    @Override
-    public void releaseSlot(ReleaseSlotRequest request, StreamObserver<DealResponse> responseObserver) {
-        run(responseObserver, () -> dealService.releaseSlot(request.getDealId()));
+    public void updateParticipantPayment(UpdateParticipantPaymentRequest request,
+            StreamObserver<UpdateParticipantPaymentResponse> responseObserver) {
+        reply(responseObserver, () -> UpdateParticipantPaymentResponse.newBuilder()
+                .setDealStatus(dealService.updateParticipantPayment(request.getDealId(), request.getParticipantId(),
+                        request.getPaymentId(), request.getStatus()).getStatus().name())
+                .build());
     }
 
     // --- helpers -----------------------------------------------------------------
 
-    private void run(StreamObserver<DealResponse> responseObserver, java.util.function.Supplier<com.harnkan.deal.domain.Deal> action) {
+    private <T> void reply(StreamObserver<T> responseObserver, Supplier<T> action) {
         try {
-            com.harnkan.deal.domain.Deal deal = action.get();
-            responseObserver.onNext(DealResponse.newBuilder().setDeal(toProto(deal)).build());
+            T response = action.get();
+            responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (DealValidationException e) {
             responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
-        } catch (DealNotFoundException e) {
+        } catch (DealNotFoundException | ParticipantNotFoundException e) {
             responseObserver.onError(Status.NOT_FOUND.withDescription(e.getMessage()).asRuntimeException());
         } catch (DealPermissionException e) {
             responseObserver.onError(Status.PERMISSION_DENIED.withDescription(e.getMessage()).asRuntimeException());
@@ -81,26 +83,31 @@ public class DealGrpcService extends DealServiceGrpc.DealServiceImplBase {
         }
     }
 
-    private Deal toProto(com.harnkan.deal.domain.Deal deal) {
+    private static DealResponse toResponse(com.harnkan.deal.domain.Deal deal) {
         Deal.Builder builder = Deal.newBuilder()
                 .setId(deal.getId())
                 .setCreatorId(deal.getCreatorId())
-                .setShopName(deal.getShopName())
-                .setPromotionDetail(deal.getPromotionDetail())
+                .setCreatorName(deal.getCreatorName())
+                .setDealName(deal.getDealName())
                 .setCategory(deal.getCategory())
+                .setPickupLocation(deal.getPickupLocation())
+                .setTotalPrice(deal.getTotalPrice().toPlainString())
                 .setPricePerSlot(deal.getPricePerSlot().toPlainString())
                 .setTargetSlots(deal.getTargetSlots())
                 .setJoinedSlots(deal.getJoinedSlots())
                 .setLatitude(deal.getLatitude().doubleValue())
                 .setLongitude(deal.getLongitude().doubleValue())
-                .setExpiresAt(toIsoUtc(deal.getExpiresAt()))
+                .setExpiresAt(deal.getExpiresAt().toString())
                 .setStatus(deal.getStatus().name())
-                .setCreatedAt(toIsoUtc(deal.getCreatedAt()))
-                .setUpdatedAt(toIsoUtc(deal.getUpdatedAt()));
+                .setCreatedAt(deal.getCreatedAt().toString())
+                .setUpdatedAt(deal.getUpdatedAt().toString());
+        if (deal.getDetails() != null) {
+            builder.setDetails(deal.getDetails());
+        }
         if (deal.getMenuImageUrl() != null) {
             builder.setMenuImageUrl(deal.getMenuImageUrl());
         }
-        return builder.build();
+        return DealResponse.newBuilder().setDeal(builder).build();
     }
 
     private static BigDecimal parseDecimal(String value, String field) {
@@ -111,16 +118,12 @@ public class DealGrpcService extends DealServiceGrpc.DealServiceImplBase {
         }
     }
 
-    private static LocalDateTime parseIsoUtc(String value, String field) {
+    private static Instant parseIsoUtc(String value, String field) {
         try {
-            return LocalDateTime.ofInstant(Instant.parse(value), ZoneOffset.UTC);
+            return Instant.parse(value);
         } catch (DateTimeParseException e) {
             throw new DealValidationException(
                     field + " must be ISO-8601 UTC, e.g. 2026-09-29T12:00:00Z, got: " + value);
         }
-    }
-
-    private static String toIsoUtc(LocalDateTime value) {
-        return value.atOffset(ZoneOffset.UTC).toInstant().toString();
     }
 }

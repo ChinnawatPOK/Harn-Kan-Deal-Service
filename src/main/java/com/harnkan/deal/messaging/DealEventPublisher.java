@@ -31,7 +31,7 @@ public class DealEventPublisher {
                 deal.getId(),
                 deal.getCreatorId(),
                 deal.getCategory(),
-                deal.getShopName(),
+                deal.getDealName(),
                 toDouble(deal.getLatitude()),
                 toDouble(deal.getLongitude()));
 

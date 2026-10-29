@@ -20,7 +20,7 @@ public class PaymentChannelConfig {
             @Value("${payment.service.host:localhost}") String host,
             @Value("${payment.service.port:9091}") int port) {
         this.channel = ManagedChannelBuilder.forAddress(host, port)
-                .usePlaintext() // internal service-to-service traffic; no TLS for the demo
+                .usePlaintext()
                 .build();
         return channel;
     }

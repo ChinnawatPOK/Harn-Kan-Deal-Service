@@ -7,7 +7,6 @@ import static org.mockito.Mockito.verify;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.time.LocalDateTime;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -35,15 +34,15 @@ class DealEventPublisherTest {
         Deal deal = Deal.builder()
                 .id("61643f760a9142c9a7918c3d868d9301")
                 .creatorId("6aa12c60a64bc2e2be695ec1")
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
+                .dealName("Coffee Corner")
+                .details("Buy 1 Get 1")
                 .category("DRINK")
                 .pricePerSlot(new BigDecimal("49.00"))
                 .targetSlots(3)
-                .joinedSlots(0)
+                .joinedSlots(1)
                 .latitude(new BigDecimal("13.74660000"))
                 .longitude(new BigDecimal("100.53470000"))
-                .expiresAt(LocalDateTime.now().plusHours(1))
+                .expiresAt(Instant.now().plusSeconds(3600))
                 .status(DealStatus.ACTIVE)
                 .build();
 
@@ -96,7 +95,7 @@ class DealEventPublisherTest {
 
     @Test
     void publishDealCreated_eachEventGetsItsOwnId() {
-        Deal deal = Deal.builder().id("d1").creatorId("c1").category("FOOD").shopName("s").build();
+        Deal deal = Deal.builder().id("d1").creatorId("c1").category("FOOD").dealName("s").build();
         DealEventPublisher publisher = new DealEventPublisher(rabbitTemplate);
 
         publisher.publishDealCreated(deal);

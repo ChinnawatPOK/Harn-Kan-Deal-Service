@@ -12,13 +12,6 @@ import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import lombok.extern.slf4j.Slf4j;
 
-/**
- * Starts/stops the gRPC server alongside the Spring application context.
- *
- * We wire this by hand (instead of the net.devh grpc-spring-boot-starter) because that
- * starter does not yet publish a build compatible with this project's Spring Boot version;
- * a plain {@link SmartLifecycle} bean is enough for what we need here.
- */
 @Slf4j
 @Component
 public class GrpcServerLifecycle implements SmartLifecycle {

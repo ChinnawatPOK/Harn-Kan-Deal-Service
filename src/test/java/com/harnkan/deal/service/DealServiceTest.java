@@ -1,17 +1,21 @@
 package com.harnkan.deal.service;
 
+import static com.harnkan.deal.TestData.NOW;
+import static com.harnkan.deal.TestData.deal;
+import static com.harnkan.deal.TestData.host;
+import static com.harnkan.deal.TestData.participant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -20,285 +24,549 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.amqp.AmqpConnectException;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+import org.springframework.amqp.AmqpIOException;
 
 import com.harnkan.deal.client.PaymentServiceClient;
+import com.harnkan.deal.client.PaymentTimeParser;
 import com.harnkan.deal.domain.Deal;
+import com.harnkan.deal.domain.DealParticipant;
 import com.harnkan.deal.domain.DealStatus;
+import com.harnkan.deal.domain.ParticipantRole;
+import com.harnkan.deal.domain.ParticipantStatus;
 import com.harnkan.deal.exception.DealNotFoundException;
 import com.harnkan.deal.exception.DealPermissionException;
 import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.exception.DealValidationException;
+import com.harnkan.deal.exception.ParticipantNotFoundException;
+import com.harnkan.deal.exception.PaymentServiceException;
+import com.harnkan.deal.grpc.payment.CancelPaymentResponse;
 import com.harnkan.deal.grpc.payment.CreatePaymentResponse;
+import com.harnkan.deal.grpc.payment.PaymentStatusItem;
 import com.harnkan.deal.grpc.payment.RefundDealResponse;
 import com.harnkan.deal.messaging.DealEventPublisher;
+import com.harnkan.deal.repository.DealParticipantRepository;
 import com.harnkan.deal.repository.DealRepository;
+import com.harnkan.deal.web.CurrentUser;
 
-/**
- * Covers the core business logic behind DR2/DG1 (create), DR4/DG2 (get), DR7 (join -> PG1
- * CreatePayment), DR6/DG4 (cancel -> PG4 RefundDeal), DG5 (confirmSlot) and DG6 (releaseSlot) —
- * independent of whether the caller is REST or gRPC.
- */
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class DealServiceTest {
+
+    private static final String DEAL_ID = "deal-1";
+    private static final CurrentUser ANYA = new CurrentUser("anya", "Anya P.");
 
     @Mock
     private DealRepository dealRepository;
-
     @Mock
-    private PaymentServiceClient paymentServiceClient;
-
+    private DealParticipantRepository participantRepository;
     @Mock
-    private DealEventPublisher dealEventPublisher;
+    private PaymentServiceClient paymentClient;
+    @Mock
+    private DealEventPublisher publisher;
 
-    private DealService dealService;
+    private DealService service;
 
     @BeforeEach
     void setUp() {
-        dealService = new DealService(dealRepository, paymentServiceClient, dealEventPublisher);
+        service = new DealService(dealRepository, participantRepository, paymentClient,
+                new PaymentTimeParser("UTC"), publisher, Clock.fixed(NOW, ZoneOffset.UTC));
+        when(dealRepository.save(any(Deal.class))).thenAnswer(i -> i.getArgument(0));
+        when(participantRepository.save(any(DealParticipant.class))).thenAnswer(i -> i.getArgument(0));
+    }
+
+    private Deal givenDeal(DealStatus status, int joined, int target, DealParticipant... rows) {
+        Deal d = deal(DEAL_ID, status, joined, target);
+        when(dealRepository.findByIdForUpdate(DEAL_ID)).thenReturn(Optional.of(d));
+        when(participantRepository.findByDealIdOrderByJoinedAtAsc(DEAL_ID)).thenReturn(List.of(rows));
+        return d;
+    }
+
+    private static CreateDealCommand.CreateDealCommandBuilder validCommand() {
+        return CreateDealCommand.builder().creatorId("host-1").creatorName("Ploy S.").dealName("Pizza")
+                .category("food").pickupLocation("Ari").latitude(new BigDecimal("13.7")).longitude(new BigDecimal("100.5"))
+                .totalPrice(new BigDecimal("760")).targetSlots(3).expiresAt(NOW.plusSeconds(1800));
+    }
+
+    // --- create ---------------------------------------------------------------------
+
+    @Test
+    void createDeal_roundsPricePerSlotUpToWholeBahtAndAddsHostRow() {
+        Deal deal = service.createDeal(validCommand().build());
+
+        assertThat(deal.getPricePerSlot()).isEqualByComparingTo("254.00"); // 760 / 3 = 253.33 -> 254
+        assertThat(deal.getPricePerSlot().scale()).isEqualTo(2);
+        assertThat(deal.getJoinedSlots()).isEqualTo(1);
+        assertThat(deal.getCategory()).isEqualTo("FOOD");
+        assertThat(deal.getStatus()).isEqualTo(DealStatus.ACTIVE);
+
+        ArgumentCaptor<DealParticipant> row = ArgumentCaptor.forClass(DealParticipant.class);
+        verify(participantRepository).save(row.capture());
+        assertThat(row.getValue().getRole()).isEqualTo(ParticipantRole.HOST);
+        assertThat(row.getValue().getStatus()).isEqualTo(ParticipantStatus.HOST);
+        assertThat(row.getValue().getUserId()).isEqualTo("host-1");
+        verify(publisher).publishDealCreated(deal);
     }
 
     @Test
-    void createDeal_savesActiveDealWithZeroJoinedSlots() {
-        when(dealRepository.save(any())).thenAnswer(invocation -> {
-            Deal d = invocation.getArgument(0);
-            d.setId("generated-id");
-            return d;
-        });
+    void pricePerSlot_exactDivisionStaysExact() {
+        assertThat(DealService.pricePerSlot(new BigDecimal("756.00"), 4)).isEqualByComparingTo("189.00");
+    }
 
-        Deal deal = dealService.createDeal(CreateDealCommand.builder()
-                .creatorId("creator-1")
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
-                .category("DRINK")
-                .pricePerSlot(new BigDecimal("49.00"))
-                .targetSlots(3)
-                .latitude(new BigDecimal("13.75630000"))
-                .longitude(new BigDecimal("100.50180000"))
-                .expiresAt(LocalDateTime.now().plusHours(1))
+    @Test
+    void createDeal_survivesBrokerOutage() {
+        org.mockito.Mockito.doThrow(new AmqpIOException(new java.io.IOException("down")))
+                .when(publisher).publishDealCreated(any());
+
+        assertThat(service.createDeal(validCommand().build()).getId()).isNull(); // id is assigned by JPA on persist
+    }
+
+    @Test
+    void createDeal_rejectsBadInput() {
+        assertThatThrownBy(() -> service.createDeal(validCommand().targetSlots(1).build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().targetSlots(21).build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().totalPrice(BigDecimal.ZERO).build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().category("TOYS").build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().expiresAt(NOW.minusSeconds(1)).build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().latitude(new BigDecimal("91")).build()))
+                .isInstanceOf(DealValidationException.class);
+        assertThatThrownBy(() -> service.createDeal(validCommand().pickupLocation(" ").build()))
+                .isInstanceOf(DealValidationException.class);
+    }
+
+    // --- join -----------------------------------------------------------------------
+
+    private void paymentWillReserve() {
+        when(paymentClient.createPayment(DEAL_ID, "anya", new BigDecimal("189.00"))).thenReturn(
+                CreatePaymentResponse.newBuilder().setPaymentId("pay-anya").setStatus("RESERVED")
+                        .setReservedUntil("2026-10-24T08:05:00").build());
+    }
+
+    @Test
+    void joinDeal_reservesSlotAndStoresPayment() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+        paymentWillReserve();
+
+        JoinDealResult result = service.joinDeal(DEAL_ID, ANYA);
+
+        assertThat(d.getJoinedSlots()).isEqualTo(2);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
+        DealParticipant p = result.getParticipant();
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.RESERVED);
+        assertThat(p.getPaymentId()).isEqualTo("pay-anya");
+        assertThat(p.getUserName()).isEqualTo("Anya P.");
+        assertThat(p.getReservedUntil()).isEqualTo(NOW.plusSeconds(300));
+    }
+
+    @Test
+    void joinDeal_lastSlotLocksTheDeal() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 3, 4, host(DEAL_ID));
+        paymentWillReserve();
+
+        service.joinDeal(DEAL_ID, ANYA);
+
+        assertThat(d.getJoinedSlots()).isEqualTo(4);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.LOCKED);
+    }
+
+    @Test
+    void joinDeal_hostCannotJoin() {
+        givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, new CurrentUser("host-1", "Ploy S.")))
+                .isInstanceOf(DealStateException.class);
+        verify(paymentClient, never()).createPayment(anyString(), anyString(), any());
+    }
+
+    @Test
+    void joinDeal_twiceIsAlreadyJoined() {
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, ANYA))
+                .isInstanceOfSatisfying(DealStateException.class, e -> assertThat(e.getCode()).isEqualTo("ALREADY_JOINED"));
+    }
+
+    @Test
+    void joinDeal_fullDealIsRejected() {
+        givenDeal(DealStatus.LOCKED, 4, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, ANYA))
+                .isInstanceOfSatisfying(DealStateException.class, e -> assertThat(e.getCode()).isEqualTo("DEAL_FULL"));
+    }
+
+    @Test
+    void joinDeal_expiredDealIsRejected() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+        d.setExpiresAt(NOW.minusSeconds(1));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, ANYA))
+                .isInstanceOfSatisfying(DealStateException.class, e -> assertThat(e.getCode()).isEqualTo("DEAL_EXPIRED"));
+    }
+
+    @Test
+    void joinDeal_cancelledDealIsRejected() {
+        givenDeal(DealStatus.CANCELLED, 1, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, ANYA)).isInstanceOf(DealStateException.class);
+    }
+
+    @Test
+    void joinDeal_leftUserCanJoinAgain() {
+        givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID), participant("old", DEAL_ID, "anya", ParticipantStatus.FAILED));
+        paymentWillReserve();
+
+        assertThat(service.joinDeal(DEAL_ID, ANYA).getParticipant().getStatus()).isEqualTo(ParticipantStatus.RESERVED);
+    }
+
+    @Test
+    void joinDeal_paymentFailureWritesNothing() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+        when(paymentClient.createPayment(anyString(), anyString(), any()))
+                .thenThrow(new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
+
+        assertThatThrownBy(() -> service.joinDeal(DEAL_ID, ANYA)).isInstanceOf(PaymentServiceException.class);
+
+        assertThat(d.getJoinedSlots()).isEqualTo(1);
+        verify(participantRepository, never()).save(any(DealParticipant.class));
+    }
+
+    @Test
+    void joinDeal_unknownDeal() {
+        when(dealRepository.findByIdForUpdate("nope")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.joinDeal("nope", ANYA)).isInstanceOf(DealNotFoundException.class);
+    }
+
+    // --- leave ----------------------------------------------------------------------
+
+    @Test
+    void leaveDeal_releasesSlotAndReopensLockedDeal() {
+        Deal d = givenDeal(DealStatus.LOCKED, 4, 4, host(DEAL_ID), participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED));
+
+        service.leaveDeal(DEAL_ID, ANYA);
+
+        verify(paymentClient).cancelPayment("pay-anya");
+        assertThat(d.getJoinedSlots()).isEqualTo(3);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
+    }
+
+    @Test
+    void leaveDeal_setsParticipantFailed() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.PAYMENT_PENDING);
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), p);
+
+        service.leaveDeal(DEAL_ID, ANYA);
+
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+    }
+
+    @Test
+    void leaveDeal_afterPayingIsRejected() {
+        givenDeal(DealStatus.LOCKED, 4, 4, host(DEAL_ID), participant("p2", DEAL_ID, "anya", ParticipantStatus.HELD));
+
+        assertThatThrownBy(() -> service.leaveDeal(DEAL_ID, ANYA)).isInstanceOf(DealStateException.class);
+        verify(paymentClient, never()).cancelPayment(anyString());
+    }
+
+    @Test
+    void leaveDeal_notJoinedOrHostIsRejected() {
+        givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.leaveDeal(DEAL_ID, ANYA)).isInstanceOf(DealStateException.class);
+        assertThatThrownBy(() -> service.leaveDeal(DEAL_ID, new CurrentUser("host-1", "Ploy S.")))
+                .isInstanceOf(DealStateException.class);
+    }
+
+    @Test
+    void leaveDeal_continuesWhenPaymentHasNoCancelPaymentYet() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), p);
+        when(paymentClient.cancelPayment("pay-anya")).thenThrow(
+                new PaymentServiceException("no rpc", new StatusRuntimeException(Status.UNIMPLEMENTED)));
+
+        service.leaveDeal(DEAL_ID, ANYA);
+
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+        assertThat(d.getJoinedSlots()).isEqualTo(1);
+    }
+
+    @Test
+    void leaveDeal_paymentErrorKeepsTheSlot() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), p);
+        when(paymentClient.cancelPayment("pay-anya")).thenThrow(
+                new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
+
+        assertThatThrownBy(() -> service.leaveDeal(DEAL_ID, ANYA)).isInstanceOf(PaymentServiceException.class);
+
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.RESERVED);
+        assertThat(d.getJoinedSlots()).isEqualTo(2);
+    }
+
+    // --- cancel ---------------------------------------------------------------------
+
+    @Test
+    void cancelDeal_onlyHost() {
+        givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "anya")).isInstanceOf(DealPermissionException.class);
+    }
+
+    @Test
+    void cancelDeal_notAfterPurchase() {
+        givenDeal(DealStatus.PURCHASED, 4, 4, host(DEAL_ID));
+
+        assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "host-1")).isInstanceOf(DealStateException.class);
+    }
+
+    @Test
+    void cancelDeal_appliesPerParticipantRefundStatuses() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant unpaid = participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, unpaid);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1)
+                .addPayments(PaymentStatusItem.newBuilder().setParticipantId("narin").setStatus("REFUNDED"))
+                .addPayments(PaymentStatusItem.newBuilder().setParticipantId("anya").setStatus("FAILED"))
                 .build());
 
-        assertThat(deal.getId()).isEqualTo("generated-id");
-        assertThat(deal.getStatus()).isEqualTo(DealStatus.ACTIVE);
-        assertThat(deal.getJoinedSlots()).isZero();
-        verify(dealEventPublisher).publishDealCreated(deal);
+        service.cancelDeal(DEAL_ID, "host-1");
+
+        assertThat(d.getStatus()).isEqualTo(DealStatus.CANCELLED);
+        assertThat(d.getCancelledAt()).isEqualTo(NOW);
+        assertThat(paid.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
+        assertThat(unpaid.getStatus()).isEqualTo(ParticipantStatus.FAILED);
     }
 
     @Test
-    void createDeal_stillSucceedsWhenBrokerIsDown() {
-        when(dealRepository.save(any())).thenAnswer(invocation -> {
-            Deal d = invocation.getArgument(0);
-            d.setId("generated-id");
-            return d;
-        });
-        doThrow(new AmqpConnectException(new java.net.ConnectException("Connection refused")))
-                .when(dealEventPublisher).publishDealCreated(any());
+    void cancelDeal_userWhoRejoined_getsTheStatusOfTheirNewPayment() {
+        // narin left (old payment FAILED) and joined again (new payment HELD): both come back in payments[]
+        DealParticipant rejoined = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        rejoined.setPaymentId("pay-new");
+        givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), rejoined);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1)
+                .addPayments(PaymentStatusItem.newBuilder().setPaymentId("pay-new").setParticipantId("narin").setStatus("REFUNDED"))
+                .addPayments(PaymentStatusItem.newBuilder().setPaymentId("pay-old").setParticipantId("narin").setStatus("FAILED"))
+                .build());
 
-        Deal deal = dealService.createDeal(validCreateCommand());
+        service.cancelDeal(DEAL_ID, "host-1");
 
-        assertThat(deal.getId()).isEqualTo("generated-id");
-        assertThat(deal.getStatus()).isEqualTo(DealStatus.ACTIVE);
+        assertThat(rejoined.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
     }
 
     @Test
-    void createDeal_doesNotPublishWhenValidationFails() {
-        CreateDealCommand invalid = CreateDealCommand.builder().creatorId("creator-1").build();
+    void cancelDeal_oldPaymentWithoutPaymentsList_usesRefundedCount() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant unpaid = participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, unpaid);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
 
-        assertThatThrownBy(() -> dealService.createDeal(invalid)).isInstanceOf(DealValidationException.class);
-        verify(dealEventPublisher, never()).publishDealCreated(any());
-    }
+        service.cancelDeal(DEAL_ID, "host-1");
 
-    private static CreateDealCommand validCreateCommand() {
-        return CreateDealCommand.builder()
-                .creatorId("creator-1")
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
-                .category("DRINK")
-                .pricePerSlot(new BigDecimal("49.00"))
-                .targetSlots(3)
-                .latitude(new BigDecimal("13.75630000"))
-                .longitude(new BigDecimal("100.50180000"))
-                .expiresAt(LocalDateTime.now().plusHours(1))
-                .build();
+        assertThat(paid.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
+        assertThat(unpaid.getStatus()).isEqualTo(ParticipantStatus.FAILED);
     }
 
     @Test
-    void createDeal_rejectsInvalidTargetSlots() {
-        CreateDealCommand cmd = CreateDealCommand.builder()
-                .creatorId("creator-1")
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
-                .category("DRINK")
-                .pricePerSlot(new BigDecimal("49.00"))
-                .targetSlots(0)
-                .expiresAt(LocalDateTime.now().plusHours(1))
-                .build();
+    void cancelDeal_oldPaymentRefundedFewerThanPaid_staysPending() {
+        DealParticipant a = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant b = participant("p3", DEAL_ID, "anya", ParticipantStatus.HELD);
+        givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), a, b);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
 
-        assertThatThrownBy(() -> dealService.createDeal(cmd)).isInstanceOf(DealValidationException.class);
+        service.cancelDeal(DEAL_ID, "host-1");
+
+        assertThat(a.getStatus()).isEqualTo(ParticipantStatus.REFUND_PENDING);
+        assertThat(b.getStatus()).isEqualTo(ParticipantStatus.REFUND_PENDING);
     }
 
     @Test
-    void getDeal_throwsWhenMissing() {
-        when(dealRepository.findById("missing")).thenReturn(Optional.empty());
+    void cancelDeal_paymentDownStillCancelsAndLeavesPaidRowsPending() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant unpaid = participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, unpaid);
+        when(paymentClient.refundDeal(DEAL_ID)).thenThrow(
+                new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
 
-        assertThatThrownBy(() -> dealService.getDeal("missing")).isInstanceOf(DealNotFoundException.class);
+        service.cancelDeal(DEAL_ID, "host-1");
+
+        assertThat(d.getStatus()).isEqualTo(DealStatus.CANCELLED);
+        assertThat(paid.getStatus()).isEqualTo(ParticipantStatus.REFUND_PENDING);
+        assertThat(unpaid.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+    }
+
+    // --- DG5 ------------------------------------------------------------------------
+
+    @Test
+    void updateParticipantPayment_heldIsRecordedAndIdempotent() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.PAYMENT_PENDING);
+        givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), p);
+        when(participantRepository.findByPaymentId("pay-anya")).thenReturn(Optional.of(p));
+
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "HELD");
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "HELD");
+
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.HELD);
+        assertThat(p.getReservedUntil()).isNull();
     }
 
     @Test
-    void joinDeal_incrementsSlotAndCallsCreatePayment() {
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        LocalDateTime reservedUntil = LocalDateTime.now().plusMinutes(5).withNano(0);
-        when(paymentServiceClient.createPayment(eq("deal-1"), eq("user-2"), any(BigDecimal.class)))
-                .thenReturn(CreatePaymentResponse.newBuilder()
-                        .setPaymentId("pay-1")
-                        .setStatus("RESERVED")
-                        .setReservedUntil(reservedUntil.toString())
-                        .build());
+    void updateParticipantPayment_failedReleasesSlot() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.PAYMENT_PENDING);
+        Deal d = givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), p);
+        when(participantRepository.findByPaymentId("pay-anya")).thenReturn(Optional.of(p));
 
-        JoinDealResult result = dealService.joinDeal("deal-1", "user-2");
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "FAILED");
 
-        assertThat(result.getPaymentId()).isEqualTo("pay-1");
-        assertThat(result.getDeal().getJoinedSlots()).isEqualTo(2);
-        assertThat(result.getDeal().getStatus()).isEqualTo(DealStatus.ACTIVE);
-        assertThat(result.getReservedUntil()).isEqualTo(reservedUntil);
-        verify(paymentServiceClient).createPayment("deal-1", "user-2", existing.getPricePerSlot());
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+        assertThat(d.getJoinedSlots()).isEqualTo(1);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
     }
 
     @Test
-    void joinDeal_locksDealWhenLastSlotTaken() {
-        Deal existing = activeDeal("deal-1", "creator-1", 2, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(paymentServiceClient.createPayment(anyString(), anyString(), any(BigDecimal.class)))
-                .thenReturn(CreatePaymentResponse.newBuilder()
-                        .setPaymentId("pay-1")
-                        .setReservedUntil(LocalDateTime.now().plusMinutes(5).toString())
-                        .build());
+    void updateParticipantPayment_finishedRowsAreNeverMovedBack() {
+        DealParticipant failed = participant("p2", DEAL_ID, "anya", ParticipantStatus.FAILED);
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 2, host(DEAL_ID), failed);
+        when(participantRepository.findByPaymentId("pay-anya")).thenReturn(Optional.of(failed));
 
-        JoinDealResult result = dealService.joinDeal("deal-1", "user-2");
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "HELD");
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "FAILED");
 
-        assertThat(result.getDeal().getJoinedSlots()).isEqualTo(2);
-        assertThat(result.getDeal().getStatus()).isEqualTo(DealStatus.LOCKED);
+        assertThat(failed.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+        assertThat(d.getJoinedSlots()).isEqualTo(1); // no second decrement
     }
 
     @Test
-    void joinDeal_rejectsWhenAlreadyFull() {
-        Deal existing = activeDeal("deal-1", "creator-1", 2, 2);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
+    void updateParticipantPayment_heldOnCancelledDealBecomesRefundPending() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.PAYMENT_PENDING);
+        givenDeal(DealStatus.CANCELLED, 2, 2, host(DEAL_ID), p);
+        when(participantRepository.findByPaymentId("pay-anya")).thenReturn(Optional.of(p));
 
-        assertThatThrownBy(() -> dealService.joinDeal("deal-1", "user-3")).isInstanceOf(DealStateException.class);
-        verify(paymentServiceClient, never()).createPayment(anyString(), anyString(), any());
+        service.updateParticipantPayment(DEAL_ID, "anya", "pay-anya", "HELD");
+
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.REFUND_PENDING);
     }
 
     @Test
-    void joinDeal_rollsBackSlotWhenPaymentServiceFails() {
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        ArgumentCaptor<Deal> captor = ArgumentCaptor.forClass(Deal.class);
-        when(dealRepository.save(captor.capture())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(paymentServiceClient.createPayment(anyString(), anyString(), any(BigDecimal.class)))
-                .thenThrow(new RuntimeException("Payment Service unreachable"));
+    void updateParticipantPayment_findsParticipantByUserWhenNoPaymentId() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), p);
 
-        assertThatThrownBy(() -> dealService.joinDeal("deal-1", "user-2")).isInstanceOf(RuntimeException.class);
+        Deal d = service.updateParticipantPayment(DEAL_ID, "anya", "", "PAYMENT_PENDING");
 
-        // last save() call must have rolled the slot back to its original count
-        assertThat(captor.getValue().getJoinedSlots()).isEqualTo(1);
-        assertThat(captor.getValue().getStatus()).isEqualTo(DealStatus.ACTIVE);
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.PAYMENT_PENDING);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
     }
 
     @Test
-    void cancelDeal_rejectsNonCreator() {
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
+    void updateParticipantPayment_unknownParticipantAndBadStatus() {
+        givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
 
-        assertThatThrownBy(() -> dealService.cancelDeal("deal-1", "someone-else"))
-                .isInstanceOf(DealPermissionException.class);
-        verify(paymentServiceClient, never()).refundDeal(anyString());
+        assertThatThrownBy(() -> service.updateParticipantPayment(DEAL_ID, "ghost", "", "HELD"))
+                .isInstanceOf(ParticipantNotFoundException.class);
+        assertThatThrownBy(() -> service.updateParticipantPayment(DEAL_ID, "anya", "", "REFUNDED"))
+                .isInstanceOf(DealValidationException.class);
+    }
+
+    // --- schedulers -----------------------------------------------------------------
+
+    @Test
+    void expireReservation_releasesLateReservation() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        p.setReservedUntil(NOW.minusSeconds(1));
+        Deal d = givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), p);
+        when(participantRepository.findById("p2")).thenReturn(Optional.of(p));
+
+        assertThat(service.expireReservation(DEAL_ID, "p2")).isTrue();
+
+        verify(paymentClient).cancelPayment("pay-anya");
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.FAILED);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
     }
 
     @Test
-    void cancelDeal_cancelsAndTriggersRefund() {
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(paymentServiceClient.refundDeal("deal-1"))
-                .thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
+    void expireReservation_skipsWhenPaymentSaysItAlreadyMovedOn() {
+        DealParticipant p = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        p.setReservedUntil(NOW.minusSeconds(1));
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), p);
+        when(participantRepository.findById("p2")).thenReturn(Optional.of(p));
+        when(paymentClient.cancelPayment("pay-anya")).thenThrow(
+                new PaymentServiceException("paid", new StatusRuntimeException(Status.FAILED_PRECONDITION)));
 
-        Deal cancelled = dealService.cancelDeal("deal-1", "creator-1");
-
-        assertThat(cancelled.getStatus()).isEqualTo(DealStatus.CANCELLED);
-        verify(paymentServiceClient).refundDeal("deal-1");
+        assertThat(service.expireReservation(DEAL_ID, "p2")).isFalse();
+        assertThat(p.getStatus()).isEqualTo(ParticipantStatus.RESERVED);
     }
 
     @Test
-    void cancelDeal_stillSucceedsWhenRefundDealFails() {
-        // Regression test: the deal is already cancelled (saved) before RefundDeal is called,
-        // so a broken/unreachable Payment Service must not turn an already-successful cancel
-        // into an error — it's best-effort and should just be logged.
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(paymentServiceClient.refundDeal("deal-1"))
-                .thenThrow(new com.harnkan.deal.exception.PaymentServiceException("boom", new RuntimeException()));
+    void expireReservation_ignoresStillValidOrAlreadyPaid() {
+        DealParticipant valid = participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED); // reserved until NOW+300
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), valid);
+        when(participantRepository.findById("p2")).thenReturn(Optional.of(valid));
 
-        Deal cancelled = dealService.cancelDeal("deal-1", "creator-1");
-
-        assertThat(cancelled.getStatus()).isEqualTo(DealStatus.CANCELLED);
+        assertThat(service.expireReservation(DEAL_ID, "p2")).isFalse();
+        verify(paymentClient, never()).cancelPayment(anyString());
     }
 
     @Test
-    void confirmSlot_doesNotChangeJoinedSlots() {
-        Deal existing = activeDeal("deal-1", "creator-1", 3, 1);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
+    void expireDeal_marksExpiredAndRefunds() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        Deal d = givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID), paid);
+        d.setExpiresAt(NOW.minusSeconds(1));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder()
+                .addPayments(PaymentStatusItem.newBuilder().setParticipantId("narin").setStatus("REFUNDED")).build());
 
-        Deal result = dealService.confirmSlot("deal-1");
+        assertThat(service.expireDeal(DEAL_ID)).isTrue();
 
-        assertThat(result.getJoinedSlots()).isEqualTo(1);
-        verify(dealRepository, never()).save(any());
+        assertThat(d.getStatus()).isEqualTo(DealStatus.EXPIRED);
+        assertThat(paid.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
     }
 
     @Test
-    void releaseSlot_decrementsAndUnlocks() {
-        Deal existing = activeDeal("deal-1", "creator-1", 2, 2);
-        existing.setStatus(DealStatus.LOCKED);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+    void expireDeal_notYetExpiredIsLeftAlone() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
 
-        Deal result = dealService.releaseSlot("deal-1");
-
-        assertThat(result.getJoinedSlots()).isEqualTo(1);
-        assertThat(result.getStatus()).isEqualTo(DealStatus.ACTIVE);
+        assertThat(service.expireDeal(DEAL_ID)).isFalse();
+        assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
+        verify(paymentClient, never()).refundDeal(anyString());
     }
 
     @Test
-    void releaseSlot_neverGoesBelowZero() {
-        Deal existing = activeDeal("deal-1", "creator-1", 2, 0);
-        when(dealRepository.findById("deal-1")).thenReturn(Optional.of(existing));
-        when(dealRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+    void retryRefund_onlyTouchesRefundPendingRows() {
+        DealParticipant pending = participant("p2", DEAL_ID, "narin", ParticipantStatus.REFUND_PENDING);
+        DealParticipant done = participant("p3", DEAL_ID, "anya", ParticipantStatus.REFUNDED);
+        givenDeal(DealStatus.CANCELLED, 3, 3, host(DEAL_ID), pending, done);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder()
+                .addPayments(PaymentStatusItem.newBuilder().setParticipantId("narin").setStatus("REFUNDED")).build());
 
-        Deal result = dealService.releaseSlot("deal-1");
+        service.retryRefund(DEAL_ID);
 
-        assertThat(result.getJoinedSlots()).isZero();
+        assertThat(pending.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
+        assertThat(done.getStatus()).isEqualTo(ParticipantStatus.REFUNDED);
     }
 
-    private static Deal activeDeal(String id, String creatorId, int targetSlots, int joinedSlots) {
-        return Deal.builder()
-                .id(id)
-                .creatorId(creatorId)
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
-                .category("DRINK")
-                .pricePerSlot(new BigDecimal("49.00"))
-                .targetSlots(targetSlots)
-                .joinedSlots(joinedSlots)
-                .latitude(new BigDecimal("13.75630000"))
-                .longitude(new BigDecimal("100.50180000"))
-                .expiresAt(LocalDateTime.now().plusHours(1))
-                .status(DealStatus.ACTIVE)
-                .createdAt(LocalDateTime.now())
-                .updatedAt(LocalDateTime.now())
-                .build();
+    @Test
+    void retryRefund_stillDownStaysPending() {
+        DealParticipant pending = participant("p2", DEAL_ID, "narin", ParticipantStatus.REFUND_PENDING);
+        givenDeal(DealStatus.CANCELLED, 2, 2, host(DEAL_ID), pending);
+        when(paymentClient.refundDeal(DEAL_ID)).thenThrow(
+                new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
+
+        service.retryRefund(DEAL_ID);
+
+        assertThat(pending.getStatus()).isEqualTo(ParticipantStatus.REFUND_PENDING);
+    }
+
+    @Test
+    void cancelPaymentResponseTypeIsUsedByTheClient() {
+        // keeps the generated PG2 message on the test classpath
+        assertThat(CancelPaymentResponse.getDefaultInstance().getStatus()).isEmpty();
     }
 }

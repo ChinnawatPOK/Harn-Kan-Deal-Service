@@ -5,6 +5,8 @@ import java.math.BigDecimal;
 import org.springframework.stereotype.Component;
 
 import com.harnkan.deal.exception.PaymentServiceException;
+import com.harnkan.deal.grpc.payment.CancelPaymentRequest;
+import com.harnkan.deal.grpc.payment.CancelPaymentResponse;
 import com.harnkan.deal.grpc.payment.CreatePaymentRequest;
 import com.harnkan.deal.grpc.payment.CreatePaymentResponse;
 import com.harnkan.deal.grpc.payment.PaymentServiceGrpc;
@@ -31,6 +33,16 @@ public class PaymentServiceClient {
         } catch (StatusRuntimeException e) {
             throw new PaymentServiceException(
                     "Payment Service CreatePayment failed for deal " + dealId + ": " + describe(e), e);
+        }
+    }
+
+    public CancelPaymentResponse cancelPayment(String paymentId) {
+        try {
+            return paymentServiceBlockingStub.cancelPayment(
+                    CancelPaymentRequest.newBuilder().setPaymentId(paymentId).build());
+        } catch (StatusRuntimeException e) {
+            throw new PaymentServiceException(
+                    "Payment Service CancelPayment failed for payment " + paymentId + ": " + describe(e), e);
         }
     }
 

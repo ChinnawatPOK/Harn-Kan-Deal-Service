@@ -16,6 +16,9 @@ spring:
     properties:
       hibernate:
         format_sql: true
+        # every DATETIME column is UTC
+        jdbc:
+          time_zone: UTC
 
   sql:
     init:
@@ -36,10 +39,18 @@ spring:
 server:
   port: 8081
 
-deal:
-  jwt-secret: 9768318c34e318158c87bfb9004a71fbcb9badb1056f74b011d485e27bb4e9a8
+# gateway: trust X-User-Id / X-User-Name from the API gateway (default)
+# jwt:     verify the bearer token here with JWT_SECRET (direct calls while developing)
+auth:
+  mode: ${AUTH_MODE:gateway}
 
-# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, ConfirmSlot, ReleaseSlot)
+deal:
+  jwt-secret: ${JWT_SECRET:}
+  scheduler:
+    enabled: true
+    interval-ms: 30000
+
+# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, UpdateParticipantPayment)
 grpc:
   server:
     port: 9090
@@ -47,5 +58,7 @@ grpc:
 # gRPC client
 payment:
   service:
-    host: localhost
-    port: 9091
+    host: ${PAYMENT_SERVICE_HOST:localhost}
+    port: ${PAYMENT_SERVICE_PORT:9091}
+    # zone of Payment's JVM, used to read its zone-less reserved_until
+    timezone: ${PAYMENT_SERVICE_TIMEZONE:UTC}

@@ -7,8 +7,13 @@ option java_multiple_files = true;
 option java_outer_classname = "PaymentProto";
 
 service PaymentService {
+  // PG1
   rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
 
+  // PG2: RESERVED / PAYMENT_PENDING -> FAILED (other statuses -> FAILED_PRECONDITION)
+  rpc CancelPayment(CancelPaymentRequest) returns (CancelPaymentResponse);
+
+  // PG4
   rpc RefundDeal(RefundDealRequest) returns (RefundDealResponse);
 }
 
@@ -24,10 +29,26 @@ message CreatePaymentResponse {
   string reserved_until = 3;
 }
 
+message CancelPaymentRequest {
+  string payment_id = 1;
+}
+
+message CancelPaymentResponse {
+  string payment_id = 1;
+  string status = 2;
+}
+
 message RefundDealRequest {
   string deal_id = 1;
 }
 
 message RefundDealResponse {
   int32 refunded_count = 1;
+  repeated PaymentStatusItem payments = 2;   // lets Deal update every participant in one call
+}
+
+message PaymentStatusItem {
+  string payment_id = 1;
+  string participant_id = 2;
+  string status = 3;    // FAILED | REFUND_PENDING | REFUNDED | RELEASED
 }

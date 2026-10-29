@@ -7,46 +7,53 @@ option java_multiple_files = true;
 option java_outer_classname = "DealProto";
 
 service DealService {
+  // DG1
   rpc CreateDeal(CreateDealRequest) returns (DealResponse);
 
+  // DG2
   rpc GetDeal(GetDealRequest) returns (DealResponse);
 
+  // DG4
   rpc CancelDeal(CancelDealRequest) returns (DealResponse);
 
-  rpc ConfirmSlot(ConfirmSlotRequest) returns (DealResponse);
-
-  rpc ReleaseSlot(ReleaseSlotRequest) returns (DealResponse);
+  // DG5: Payment tells Deal that a payment changed status. Replaces ConfirmSlot / ReleaseSlot.
+  rpc UpdateParticipantPayment(UpdateParticipantPaymentRequest) returns (UpdateParticipantPaymentResponse);
 }
 
 message Deal {
   string id = 1;
   string creator_id = 2;
-  string shop_name = 3;
-  string promotion_detail = 4;
+  string deal_name = 3;
+  string details = 4;
   string category = 5;
   string menu_image_url = 6;
   string price_per_slot = 7;   // decimal amount as string, avoids float precision loss
-  int32 target_slots = 8;      // total people required, creator included
-  int32 joined_slots = 9;      // slots currently confirmed/in use
+  int32 target_slots = 8;      // total people required, host included
+  int32 joined_slots = 9;      // slots currently in use (host + reserved/paid participants)
   double latitude = 10;
   double longitude = 11;
-  string expires_at = 12;
+  string expires_at = 12;      // ISO-8601 UTC
   string status = 13;          // ACTIVE | LOCKED | PURCHASED | COMPLETED | CANCELLED | EXPIRED
   string created_at = 14;      // ISO-8601 UTC
   string updated_at = 15;      // ISO-8601 UTC
+  string creator_name = 16;
+  string pickup_location = 17;
+  string total_price = 18;     // decimal amount as string
 }
 
 message CreateDealRequest {
   string creator_id = 1;
-  string shop_name = 2;
-  string promotion_detail = 3;
+  string deal_name = 2;
+  string details = 3;
   string category = 4;
   string menu_image_url = 5;
-  string price_per_slot = 6;
+  string total_price = 6;      // price_per_slot = ceil(total_price / target_slots), computed by Deal
   int32 target_slots = 7;
   double latitude = 8;
   double longitude = 9;
-  string expires_at = 10; // ISO-8601 UTC
+  string expires_at = 10;      // ISO-8601 UTC
+  string creator_name = 11;
+  string pickup_location = 12;
 }
 
 message GetDealRequest {
@@ -58,14 +65,15 @@ message CancelDealRequest {
   string requester_id = 2; // must equal Deal.creator_id
 }
 
-message ConfirmSlotRequest {
+message UpdateParticipantPaymentRequest {
   string deal_id = 1;
-  string participant_id = 2; // logical reference to users._id, for logging/idempotency only
+  string participant_id = 2; // users._id of the paying participant
+  string payment_id = 3;
+  string status = 4;         // PAYMENT_PENDING | HELD | FAILED
 }
 
-message ReleaseSlotRequest {
-  string deal_id = 1;
-  string participant_id = 2; // logical reference to users._id, for logging/idempotency only
+message UpdateParticipantPaymentResponse {
+  string deal_status = 1;
 }
 
 message DealResponse {
