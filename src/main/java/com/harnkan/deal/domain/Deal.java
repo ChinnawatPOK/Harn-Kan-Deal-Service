@@ -86,9 +86,6 @@ public class Deal {
     @Builder.Default
     private DealStatus status = DealStatus.ACTIVE;
 
-    @Column(name = "purchased_at")
-    private Instant purchasedAt;
-
     @Column(name = "completed_at")
     private Instant completedAt;
 

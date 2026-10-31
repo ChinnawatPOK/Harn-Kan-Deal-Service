@@ -19,7 +19,6 @@ public record DealDetailDto(
         int joinedSlots,
         String status,
         Instant expiresAt,
-        Instant purchasedAt,
         Instant completedAt,
         Instant cancelledAt,
         Instant createdAt,

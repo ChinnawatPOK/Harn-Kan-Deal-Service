@@ -5,6 +5,5 @@ public record ActionsDto(
         boolean canPay,
         boolean canLeave,
         boolean canCancel,
-        boolean canMarkPurchased,
         boolean canConfirmReceipt) {
 }

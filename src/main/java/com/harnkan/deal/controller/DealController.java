@@ -24,6 +24,7 @@ import com.harnkan.deal.dto.JoinDealResponseDto;
 import com.harnkan.deal.dto.MineItemDto;
 import com.harnkan.deal.dto.NearbyItemDto;
 import com.harnkan.deal.dto.PageDto;
+import com.harnkan.deal.dto.ReceiptDto;
 
 import lombok.RequiredArgsConstructor;
 
@@ -92,6 +93,19 @@ public class DealController {
     public DealDetailDto leave(CurrentUser user, @PathVariable String dealId) {
         dealService.leaveDeal(dealId, user);
         return queryService.detail(dealId, user.id(), null, null);
+    }
+
+    /** DR9 */
+    @PostMapping("/{dealId}/confirm-receipt")
+    public DealDetailDto confirmReceipt(CurrentUser user, @PathVariable String dealId) {
+        dealService.confirmReceipt(dealId, user);
+        return queryService.detail(dealId, user.id(), null, null);
+    }
+
+    /** DR11 */
+    @GetMapping("/{dealId}/receipt")
+    public ReceiptDto receipt(CurrentUser user, @PathVariable String dealId) {
+        return queryService.receipt(dealId, user.id());
     }
 
     /** DR6 */
