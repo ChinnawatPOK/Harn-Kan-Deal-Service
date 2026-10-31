@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import com.harnkan.deal.domain.Deal;
 import com.harnkan.deal.domain.DealParticipant;
+import com.harnkan.deal.domain.DealStatus;
 import com.harnkan.deal.domain.ParticipantStatus;
 import com.harnkan.deal.repository.DealParticipantRepository;
 import com.harnkan.deal.repository.DealRepository;
@@ -22,7 +23,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * SCH1-SCH3 (api-design.md 3.3). Each item is handled by its own DealService transaction,
+ * SCH1-SCH4 (api-design.md 3.3). Each item is handled by its own DealService transaction,
  * so one failing item (e.g. Payment down) never blocks the others and is simply retried next tick.
  */
 @Slf4j
@@ -62,6 +63,23 @@ public class DealScheduler {
                 }
             } catch (RuntimeException e) {
                 log.warn("SCH2 failed for deal {}: {}", d.getId(), e.getMessage());
+            }
+        }
+    }
+
+    /** SCH4: everyone confirmed receipt but the payout to the host failed. */
+    @Scheduled(fixedDelayString = "${deal.scheduler.interval-ms:30000}", initialDelayString = "${deal.scheduler.initial-delay-ms:10000}")
+    public void retryPayouts() {
+        for (Deal d : dealRepository.findByStatus(DealStatus.LOCKED)) {
+            if (!DealActions.allReceived(participantRepository.findByDealIdOrderByJoinedAtAsc(d.getId()))) {
+                continue; // cheap check first, so ordinary LOCKED deals are not row-locked every tick
+            }
+            try {
+                if (dealService.retryPayout(d.getId())) {
+                    log.info("SCH4 paid out deal {}", d.getId());
+                }
+            } catch (RuntimeException e) {
+                log.warn("SCH4 failed for deal {}: {}", d.getId(), e.getMessage());
             }
         }
     }

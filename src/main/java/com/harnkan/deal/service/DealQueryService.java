@@ -19,6 +19,10 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.harnkan.deal.dto.ReceiptDto;
+import com.harnkan.deal.dto.ReceiptLineDto;
+import com.harnkan.deal.exception.DealPermissionException;
+import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.domain.Deal;
 import com.harnkan.deal.domain.DealParticipant;
 import com.harnkan.deal.domain.DealStatus;
@@ -49,7 +53,7 @@ public class DealQueryService {
     private static final int MAX_RADIUS_METERS = 50_000;
     private static final int MAX_PAGE_SIZE = 100;
 
-    private static final Set<DealStatus> IN_PROGRESS = EnumSet.of(DealStatus.ACTIVE, DealStatus.LOCKED, DealStatus.PURCHASED);
+    private static final Set<DealStatus> IN_PROGRESS = EnumSet.of(DealStatus.ACTIVE, DealStatus.LOCKED);
     private static final Set<DealStatus> FINISHED =
             EnumSet.of(DealStatus.CANCELLED, DealStatus.EXPIRED, DealStatus.COMPLETED);
     private static final Set<ParticipantStatus> JOINED_TAB = EnumSet.of(
@@ -89,7 +93,7 @@ public class DealQueryService {
                 deal.getPickupLocation(), deal.getLatitude(), deal.getLongitude(),
                 money(deal.getTotalPrice()), money(deal.getPricePerSlot()),
                 deal.getTargetSlots(), deal.getJoinedSlots(), deal.getStatus().name(),
-                deal.getExpiresAt(), deal.getPurchasedAt(), deal.getCompletedAt(), deal.getCancelledAt(),
+                deal.getExpiresAt(), deal.getCompletedAt(), deal.getCancelledAt(),
                 deal.getCreatedAt(), distance, participants,
                 me == null ? null : toMe(deal, me, rows, now),
                 new JoinOnlyActionsDto(DealActions.canJoin(deal, null, now)));
@@ -105,6 +109,36 @@ public class DealQueryService {
                 refunding ? money(deal.getPricePerSlot()) : money(BigDecimal.ZERO),
                 me.getReservedUntil(),
                 DealActions.forCaller(deal, me, rows, now));
+    }
+
+    // --- DR11 -----------------------------------------------------------------------
+
+    /** Only for a COMPLETED deal, and only for its host or a participant who paid and confirmed receipt. */
+    public ReceiptDto receipt(String dealId, String userId) {
+        Deal deal = dealRepository.findById(dealId).orElseThrow(() -> new DealNotFoundException(dealId));
+        if (deal.getStatus() != DealStatus.COMPLETED) {
+            throw new DealStateException("Receipt is available once the deal is completed, status=" + deal.getStatus());
+        }
+        List<DealParticipant> rows = sorted(participantRepository.findByDealIdOrderByJoinedAtAsc(dealId));
+        DealParticipant me = DealActions.currentRow(rows.stream().filter(p -> p.getUserId().equals(userId)).toList());
+        boolean host = me != null && me.getRole() == ParticipantRole.HOST;
+        if (me == null || !(host || me.getStatus() == ParticipantStatus.RECEIVED)) {
+            throw new DealPermissionException("Only the host or a participant who paid can see this receipt");
+        }
+
+        BigDecimal share = money(deal.getPricePerSlot());
+        List<ReceiptLineDto> lines = rows.stream()
+                .filter(p -> p.getRole() == ParticipantRole.PARTICIPANT && p.getStatus() == ParticipantStatus.RECEIVED)
+                .map(p -> new ReceiptLineDto(p.getUserId().equals(userId) ? "You" : p.getUserName(),
+                        p.getRole().name(), share))
+                .toList();
+        BigDecimal payout = money(share.multiply(BigDecimal.valueOf(lines.size())));
+        String receiptNo = "RC-" + deal.getId().substring(0, Math.min(8, deal.getId().length())).toUpperCase(Locale.ROOT)
+                + "-" + userId.substring(Math.max(0, userId.length() - 4)).toUpperCase(Locale.ROOT);
+
+        return new ReceiptDto(receiptNo, deal.getId(), deal.getDealName(), deal.getCategory(), deal.getCompletedAt(),
+                money(deal.getTotalPrice()), share, me.getRole().name(), host ? payout : share,
+                host ? null : me.getPaymentId(), payout, lines);
     }
 
     // --- DR3 ------------------------------------------------------------------------
@@ -189,7 +223,7 @@ public class DealQueryService {
             boolean host = mine.getRole() == ParticipantRole.HOST;
             int ready = (int) all.stream().filter(p -> p.getRole() == ParticipantRole.HOST
                     || p.getStatus() == ParticipantStatus.HELD || p.getStatus() == ParticipantStatus.RECEIVED).count();
-            boolean readyToOrder = host && d.getStatus() == DealStatus.LOCKED && DealActions.allParticipantsHeld(all);
+            boolean readyToOrder = host && DealActions.fullyPaid(d, all);
             return new MineItemDto(d.getId(), d.getDealName(), d.getCategory(), d.getStatus().name(),
                     mine.getRole().name(), mine.getStatus().name(), money(d.getTotalPrice()), money(d.getPricePerSlot()),
                     d.getJoinedSlots(), d.getTargetSlots(), ready, readyToOrder, d.getExpiresAt(), d.getCreatedAt());

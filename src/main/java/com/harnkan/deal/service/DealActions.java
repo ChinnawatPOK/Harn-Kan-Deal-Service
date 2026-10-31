@@ -35,10 +35,9 @@ public final class DealActions {
                 canJoin(deal, me, now),
                 status == ParticipantStatus.RESERVED && open,
                 (status == ParticipantStatus.RESERVED || status == ParticipantStatus.PAYMENT_PENDING) && open,
-                isHost && open,
-                isHost && deal.getStatus() == DealStatus.LOCKED && allParticipantsHeld(rows),
+                isHost && open && !anyReceived(rows),
                 me != null && me.getRole() == ParticipantRole.PARTICIPANT
-                        && status == ParticipantStatus.HELD && deal.getStatus() == DealStatus.PURCHASED);
+                        && status == ParticipantStatus.HELD && fullyPaid(deal, rows));
     }
 
     /** Not holding a slot already, deal open, not expired, a slot is free. */
@@ -50,11 +49,29 @@ public final class DealActions {
                 && deal.getJoinedSlots() < deal.getTargetSlots();
     }
 
-    /** Every participant that still holds a slot has paid (HELD). */
-    public static boolean allParticipantsHeld(Collection<DealParticipant> rows) {
-        return rows.stream()
+    /**
+     * "Fully paid" (api-design.md section 2): every slot is taken (LOCKED) and every participant has paid
+     * (HELD) or already confirmed receipt (RECEIVED). From here participants may confirm receipt and the
+     * deal no longer expires. There is no host "mark purchased" step.
+     */
+    public static boolean fullyPaid(Deal deal, Collection<DealParticipant> rows) {
+        return deal.getStatus() == DealStatus.LOCKED && rows.stream()
                 .filter(p -> p.getRole() == ParticipantRole.PARTICIPANT && p.getStatus().isCounted())
-                .allMatch(p -> p.getStatus() == ParticipantStatus.HELD);
+                .allMatch(p -> p.getStatus() == ParticipantStatus.HELD || p.getStatus() == ParticipantStatus.RECEIVED);
+    }
+
+    /** Every participant still in the deal confirmed receipt (and there is at least one): time to pay the host. */
+    public static boolean allReceived(Collection<DealParticipant> rows) {
+        List<DealParticipant> participants = rows.stream()
+                .filter(p -> p.getRole() == ParticipantRole.PARTICIPANT && p.getStatus().isCounted())
+                .toList();
+        return !participants.isEmpty()
+                && participants.stream().allMatch(p -> p.getStatus() == ParticipantStatus.RECEIVED);
+    }
+
+    /** Someone already confirmed receipt: from then on the host can no longer cancel. */
+    public static boolean anyReceived(Collection<DealParticipant> rows) {
+        return rows.stream().anyMatch(p -> p.getStatus() == ParticipantStatus.RECEIVED);
     }
 
     /**

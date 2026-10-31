@@ -36,4 +36,6 @@ public interface DealRepository extends JpaRepository<Deal, String> {
             @Param("minLng") BigDecimal minLng, @Param("maxLng") BigDecimal maxLng);
 
     List<Deal> findByStatusInAndExpiresAtBefore(Collection<DealStatus> statuses, Instant now);
+
+    List<Deal> findByStatus(DealStatus status);
 }
