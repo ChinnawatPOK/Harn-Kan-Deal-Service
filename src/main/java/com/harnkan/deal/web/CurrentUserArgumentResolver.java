@@ -1,9 +1,6 @@
 package com.harnkan.deal.web;
 
 import org.springframework.core.MethodParameter;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.springframework.web.context.request.NativeWebRequest;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
@@ -15,9 +12,9 @@ import java.nio.charset.StandardCharsets;
 import com.harnkan.deal.exception.UnauthorizedException;
 
 /**
- * Resolves {@link CurrentUser}. In {@code gateway} mode the user comes from the X-User-Id / X-User-Name
- * headers the gateway sets; in {@code jwt} mode (direct calls while developing) headers are ignored
- * and the verified token is used, so a client can never forge its identity.
+ * Resolves {@link CurrentUser} from the X-User-Id / X-User-Name headers. The API gateway verifies the JWT,
+ * strips any client-sent X-User-* headers and sets these, so this service holds no JWT secret. The service
+ * port must therefore not be reachable from outside the network.
  */
 public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolver {
 
@@ -28,12 +25,6 @@ public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolve
     static final int MAX_ID_LENGTH = 64;
     static final int MAX_NAME_LENGTH = 100;
 
-    private final boolean jwtMode;
-
-    public CurrentUserArgumentResolver(boolean jwtMode) {
-        this.jwtMode = jwtMode;
-    }
-
     @Override
     public boolean supportsParameter(MethodParameter parameter) {
         return CurrentUser.class.equals(parameter.getParameterType());
@@ -42,19 +33,8 @@ public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolve
     @Override
     public Object resolveArgument(MethodParameter parameter, ModelAndViewContainer mavContainer,
             NativeWebRequest webRequest, WebDataBinderFactory binderFactory) {
-        String id;
-        String name;
-        if (jwtMode) {
-            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-            if (!(auth instanceof JwtAuthenticationToken token)) {
-                throw new UnauthorizedException("Missing or invalid token");
-            }
-            id = token.getToken().getSubject();
-            name = token.getToken().getClaimAsString("name");
-        } else {
-            id = webRequest.getHeader(HEADER_USER_ID);
-            name = decodeHeader(webRequest.getHeader(HEADER_USER_NAME));
-        }
+        String id = webRequest.getHeader(HEADER_USER_ID);
+        String name = decodeHeader(webRequest.getHeader(HEADER_USER_NAME));
         if (id == null || id.isBlank()) {
             throw new UnauthorizedException("Missing " + HEADER_USER_ID);
         }
