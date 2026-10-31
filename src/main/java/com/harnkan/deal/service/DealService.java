@@ -18,6 +18,8 @@ import java.util.Set;
 import org.springframework.amqp.AmqpException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.harnkan.deal.client.PaymentServiceClient;
 import com.harnkan.deal.client.PaymentTimeParser;
@@ -240,12 +242,18 @@ public class DealService {
         if (!OPEN.contains(deal.getStatus())) {
             throw new DealStateException("Deal cannot be cancelled from status " + deal.getStatus());
         }
+        if (DealActions.anyReceived(participantRepository.findByDealIdOrderByJoinedAtAsc(dealId))) {
+            throw new DealStateException("Deal cannot be cancelled after a participant confirmed receipt");
+        }
 
         deal.setStatus(DealStatus.CANCELLED);
         deal.setCancelledAt(now());
         deal = dealRepository.save(deal);
 
+        List<String> toNotify = participantsOwedARefund(deal.getId());
         refundAndApply(deal, TO_SETTLE);
+        Deal cancelled = deal;
+        afterCommit(() -> dealEventPublisher.publishDealCancelled(cancelled, toNotify), "deal.cancelled", cancelled);
         return deal;
     }
 
@@ -318,9 +326,78 @@ public class DealService {
         if (!OPEN.contains(deal.getStatus()) || deal.getExpiresAt().isAfter(now())) {
             return false;
         }
+        // Everyone has paid: people are collecting their items, so the clock no longer applies.
+        if (DealActions.fullyPaid(deal, participantRepository.findByDealIdOrderByJoinedAtAsc(dealId))) {
+            return false;
+        }
         deal.setStatus(DealStatus.EXPIRED);
         dealRepository.save(deal);
+        List<String> toNotify = participantsOwedARefund(deal.getId());
         refundAndApply(deal, TO_SETTLE);
+        afterCommit(() -> dealEventPublisher.publishDealExpired(deal, toNotify), "deal.expired", deal);
+        return true;
+    }
+
+    // --- DR9 ------------------------------------------------------------------------
+
+    /**
+     * A participant got their items. Allowed once the deal is fully paid (no host "mark purchased" step).
+     * Repeating it answers the same. The last participant to confirm triggers the payout to the host;
+     * if that payout fails the deal stays LOCKED and SCH4 retries it.
+     */
+    @Transactional
+    public Deal confirmReceipt(String dealId, CurrentUser user) {
+        Deal deal = lock(dealId);
+        List<DealParticipant> rows = participantRepository.findByDealIdOrderByJoinedAtAsc(dealId);
+        DealParticipant me = DealActions.currentRow(
+                rows.stream().filter(p -> p.getUserId().equals(user.id())).toList());
+
+        if (me == null || me.getRole() != ParticipantRole.PARTICIPANT) {
+            throw new DealPermissionException("Only a participant of this deal can confirm receipt");
+        }
+        if (me.getStatus() == ParticipantStatus.RECEIVED) {
+            return deal;
+        }
+        if (!DealActions.fullyPaid(deal, rows)) {
+            throw new DealStateException("DEAL_NOT_READY", "Everyone must pay before receipt can be confirmed");
+        }
+        if (me.getStatus() != ParticipantStatus.HELD) {
+            throw new DealStateException("You can confirm receipt only after paying, status=" + me.getStatus());
+        }
+
+        paymentServiceClient.confirmReceipt(me.getPaymentId(), me.getUserId());
+        me.setStatus(ParticipantStatus.RECEIVED);
+        me.setReceivedAt(now());
+        participantRepository.save(me);
+
+        releaseFundsIfEveryoneReceived(deal, rows);
+        return deal;
+    }
+
+    /** SCH4: a deal where everyone confirmed receipt but the payout did not go through. */
+    @Transactional
+    public boolean retryPayout(String dealId) {
+        Deal deal = lock(dealId);
+        if (deal.getStatus() != DealStatus.LOCKED) {
+            return false;
+        }
+        return releaseFundsIfEveryoneReceived(deal, participantRepository.findByDealIdOrderByJoinedAtAsc(dealId));
+    }
+
+    /** Best-effort: a failed payout leaves the deal LOCKED with everyone RECEIVED, for SCH4. */
+    private boolean releaseFundsIfEveryoneReceived(Deal deal, List<DealParticipant> rows) {
+        if (!DealActions.allReceived(rows)) {
+            return false;
+        }
+        try {
+            paymentServiceClient.releaseFunds(deal.getId(), deal.getCreatorId());
+        } catch (PaymentServiceException e) {
+            log.warn("ReleaseFunds failed for deal {} (SCH4 will retry): {}", deal.getId(), e.getMessage());
+            return false;
+        }
+        deal.setStatus(DealStatus.COMPLETED);
+        deal.setCompletedAt(now());
+        dealRepository.save(deal);
         return true;
     }
 
@@ -331,6 +408,43 @@ public class DealService {
     }
 
     // --- internals --------------------------------------------------------------------
+
+    /**
+     * Users to tell when a deal dies: participants whose money is (or is about to be) at Payment, read
+     * before refundAndApply rewrites their rows. Never-paid reservations, users who left and the host are skipped.
+     */
+    private List<String> participantsOwedARefund(String dealId) {
+        return participantRepository.findByDealIdOrderByJoinedAtAsc(dealId).stream()
+                .filter(p -> p.getRole() == ParticipantRole.PARTICIPANT
+                        && ParticipantStatus.MONEY_AT_PAYMENT.contains(p.getStatus()))
+                .map(DealParticipant::getUserId)
+                .distinct()
+                .toList();
+    }
+
+    /**
+     * Runs the publish once the transaction has committed (a rolled-back cancel must not notify anyone).
+     * Best-effort: a broker outage is logged and never fails the command.
+     */
+    private void afterCommit(Runnable publish, String event, Deal deal) {
+        Runnable safe = () -> {
+            try {
+                publish.run();
+            } catch (RuntimeException e) {
+                log.warn("Publishing {} failed for deal {}: {}", event, deal.getId(), e.getMessage());
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    safe.run();
+                }
+            });
+        } else {
+            safe.run();
+        }
+    }
 
     private Deal lock(String dealId) {
         requireNonBlank(dealId, "deal_id");

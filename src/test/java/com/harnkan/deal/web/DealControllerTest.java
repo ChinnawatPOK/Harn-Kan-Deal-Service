@@ -62,14 +62,14 @@ class DealControllerTest {
     void setUp() {
         mvc = MockMvcBuilders
                 .standaloneSetup(new DealController(dealService, queryService, Clock.fixed(NOW, ZoneOffset.UTC)))
-                .setCustomArgumentResolvers(new CurrentUserArgumentResolver(false))
+                .setCustomArgumentResolvers(new CurrentUserArgumentResolver())
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
     }
 
     private static DealDetailDto detail(String id, MeDto me) {
         return new DealDetailDto(id, "Pizza", null, "FOOD", null, "Ari", new BigDecimal("13.7"), new BigDecimal("100.5"),
-                new BigDecimal("760.00"), new BigDecimal("254.00"), 3, 1, "ACTIVE", NOW.plusSeconds(1800), null, null, null,
+                new BigDecimal("760.00"), new BigDecimal("254.00"), 3, 1, "ACTIVE", NOW.plusSeconds(1800), null, null,
                 NOW, null, List.of(), me, new JoinOnlyActionsDto(true));
     }
 
@@ -199,7 +199,7 @@ class DealControllerTest {
         when(dealService.joinDeal(eq("d1"), any())).thenReturn(
                 new JoinDealResult(d, participant("p2", "d1", "anya", ParticipantStatus.RESERVED)));
         MeDto me = new MeDto("PARTICIPANT", "RESERVED", "pay-anya", new BigDecimal("254.00"),
-                new BigDecimal("0.00"), NOW.plusSeconds(300), new ActionsDto(false, true, true, false, false, false));
+                new BigDecimal("0.00"), NOW.plusSeconds(300), new ActionsDto(false, true, true, false, false));
         when(queryService.detail("d1", "anya", null, null)).thenReturn(detail("d1", me));
 
         mvc.perform(post("/api/deals/d1/join").header("X-User-Id", "anya"))
@@ -264,5 +264,39 @@ class DealControllerTest {
         mvc.perform(get("/api/deals/d1?lat=13.78&lng=100.54").header("X-User-Id", "u1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.me").doesNotExist());
+    }
+
+    @Test
+    void confirmReceipt_returnsTheDealDetail() throws Exception {
+        when(queryService.detail("d1", "anya", null, null)).thenReturn(detail("d1", null));
+
+        mvc.perform(post("/api/deals/d1/confirm-receipt").header("X-User-Id", "anya"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("d1"));
+        verify(dealService).confirmReceipt(eq("d1"), any(CurrentUser.class));
+    }
+
+    @Test
+    void confirmReceipt_beforeEveryonePaid_is409DealNotReady() throws Exception {
+        when(dealService.confirmReceipt(eq("d1"), any(CurrentUser.class)))
+                .thenThrow(new DealStateException("DEAL_NOT_READY", "Everyone must pay first"));
+
+        mvc.perform(post("/api/deals/d1/confirm-receipt").header("X-User-Id", "anya"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("DEAL_NOT_READY"));
+    }
+
+    @Test
+    void receipt_returnsTheReceipt() throws Exception {
+        when(queryService.receipt("d1", "anya")).thenReturn(new com.harnkan.deal.dto.ReceiptDto("RC-D1-ANYA", "d1", "Pizza",
+                "FOOD", NOW, new BigDecimal("756.00"), new BigDecimal("189.00"), "PARTICIPANT", new BigDecimal("189.00"),
+                "pay-anya", new BigDecimal("567.00"),
+                List.of(new com.harnkan.deal.dto.ReceiptLineDto("You", "PARTICIPANT", new BigDecimal("189.00")))));
+
+        mvc.perform(get("/api/deals/d1/receipt").header("X-User-Id", "anya"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.receiptNo").value("RC-D1-ANYA"))
+                .andExpect(jsonPath("$.payoutToHost").value(567.00))
+                .andExpect(jsonPath("$.lines[0].name").value("You"));
     }
 }

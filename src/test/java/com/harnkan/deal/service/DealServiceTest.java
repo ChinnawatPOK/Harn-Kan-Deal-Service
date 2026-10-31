@@ -322,10 +322,75 @@ class DealServiceTest {
     }
 
     @Test
-    void cancelDeal_notAfterPurchase() {
-        givenDeal(DealStatus.PURCHASED, 4, 4, host(DEAL_ID));
+    void cancelDeal_notAfterCompletion() {
+        givenDeal(DealStatus.COMPLETED, 4, 4, host(DEAL_ID));
 
         assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "host-1")).isInstanceOf(DealStateException.class);
+    }
+
+    @Test
+    void cancelDeal_notOnceSomeoneConfirmedReceipt() {
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID),
+                participant("p2", DEAL_ID, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.HELD));
+
+        assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "host-1")).isInstanceOf(DealStateException.class);
+
+        assertThat(d.getStatus()).isEqualTo(DealStatus.LOCKED);
+        verify(paymentClient, never()).refundDeal(anyString());
+        verify(publisher, never()).publishDealCancelled(any(), any());
+    }
+
+    @Test
+    void cancelDeal_tellsOnlyThePeopleWhoseMoneyIsAtPayment_afterTheRefund() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant paying = participant("p3", DEAL_ID, "mali", ParticipantStatus.PAYMENT_PENDING);
+        DealParticipant reserved = participant("p4", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        DealParticipant left = participant("p5", DEAL_ID, "chai", ParticipantStatus.FAILED);
+        Deal d = givenDeal(DealStatus.LOCKED, 4, 5, host(DEAL_ID), paid, paying, reserved, left);
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(2).build());
+
+        service.cancelDeal(DEAL_ID, "host-1");
+
+        // ids were read before the rows were rewritten to REFUNDED / FAILED; host never included
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(paymentClient, publisher);
+        order.verify(paymentClient).refundDeal(DEAL_ID);
+        order.verify(publisher).publishDealCancelled(d, List.of("narin", "mali"));
+        verify(publisher, never()).publishDealExpired(any(), any());
+    }
+
+    @Test
+    void cancelDeal_nobodyPaid_sendsAnEmptyList() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID),
+                participant("p2", DEAL_ID, "anya", ParticipantStatus.RESERVED));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().build());
+
+        service.cancelDeal(DEAL_ID, "host-1");
+
+        verify(publisher).publishDealCancelled(d, List.of());
+    }
+
+    @Test
+    void cancelDeal_rejected_publishesNothing() {
+        givenDeal(DealStatus.COMPLETED, 4, 4, host(DEAL_ID));
+        assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "host-1")).isInstanceOf(DealStateException.class);
+
+        givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID));
+        assertThatThrownBy(() -> service.cancelDeal(DEAL_ID, "anya")).isInstanceOf(DealPermissionException.class);
+
+        verify(publisher, never()).publishDealCancelled(any(), any());
+    }
+
+    @Test
+    void cancelDeal_survivesBrokerOutage() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 2, 4, host(DEAL_ID),
+                participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
+        org.mockito.Mockito.doThrow(new AmqpIOException(new java.io.IOException("down")))
+                .when(publisher).publishDealCancelled(any(), any());
+
+        assertThat(service.cancelDeal(DEAL_ID, "host-1").getStatus()).isEqualTo(DealStatus.CANCELLED);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.CANCELLED);
     }
 
     @Test
@@ -530,12 +595,66 @@ class DealServiceTest {
     }
 
     @Test
+    void expireDeal_tellsTheParticipantsWhoPaid() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant reserved = participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, reserved);
+        d.setExpiresAt(NOW.minusSeconds(1));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
+
+        assertThat(service.expireDeal(DEAL_ID)).isTrue();
+
+        verify(publisher).publishDealExpired(d, List.of("narin"));
+        verify(publisher, never()).publishDealCancelled(any(), any());
+    }
+
+    @Test
+    void expireDeal_survivesBrokerOutage() {
+        Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
+        d.setExpiresAt(NOW.minusSeconds(1));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().build());
+        org.mockito.Mockito.doThrow(new AmqpIOException(new java.io.IOException("down")))
+                .when(publisher).publishDealExpired(any(), any());
+
+        assertThat(service.expireDeal(DEAL_ID)).isTrue();
+        assertThat(d.getStatus()).isEqualTo(DealStatus.EXPIRED);
+    }
+
+    @Test
+    void expireDeal_fullyPaidDealDoesNotExpire() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant received = participant("p3", DEAL_ID, "anya", ParticipantStatus.RECEIVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, received);
+        d.setExpiresAt(NOW.minusSeconds(1));
+
+        assertThat(service.expireDeal(DEAL_ID)).isFalse();
+
+        assertThat(d.getStatus()).isEqualTo(DealStatus.LOCKED);
+        assertThat(paid.getStatus()).isEqualTo(ParticipantStatus.HELD);
+        verify(paymentClient, never()).refundDeal(anyString());
+        verify(publisher, never()).publishDealExpired(any(), any());
+    }
+
+    @Test
+    void expireDeal_lockedButSomeoneUnpaid_stillExpires() {
+        DealParticipant paid = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant reserved = participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), paid, reserved);
+        d.setExpiresAt(NOW.minusSeconds(1));
+        when(paymentClient.refundDeal(DEAL_ID)).thenReturn(RefundDealResponse.newBuilder().setRefundedCount(1).build());
+
+        assertThat(service.expireDeal(DEAL_ID)).isTrue();
+        assertThat(d.getStatus()).isEqualTo(DealStatus.EXPIRED);
+    }
+
+    @Test
     void expireDeal_notYetExpiredIsLeftAlone() {
         Deal d = givenDeal(DealStatus.ACTIVE, 1, 4, host(DEAL_ID));
 
         assertThat(service.expireDeal(DEAL_ID)).isFalse();
         assertThat(d.getStatus()).isEqualTo(DealStatus.ACTIVE);
         verify(paymentClient, never()).refundDeal(anyString());
+        verify(publisher, never()).publishDealExpired(any(), any());
     }
 
     @Test
@@ -568,5 +687,111 @@ class DealServiceTest {
     void cancelPaymentResponseTypeIsUsedByTheClient() {
         // keeps the generated PG2 message on the test classpath
         assertThat(CancelPaymentResponse.getDefaultInstance().getStatus()).isEmpty();
+    }
+
+    // --- DR9 confirm receipt / SCH4 payout ------------------------------------------------
+
+    private static final CurrentUser NARIN = new CurrentUser("narin", "Narin K.");
+
+    @Test
+    void confirmReceipt_lastParticipant_paysTheHostAndCompletesTheDeal() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        DealParticipant anya = participant("p3", DEAL_ID, "anya", ParticipantStatus.RECEIVED);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), narin, anya);
+        when(paymentClient.releaseFunds(DEAL_ID, "host-1"))
+                .thenReturn(com.harnkan.deal.grpc.payment.ReleaseFundsResponse.newBuilder().setReleasedCount(2).build());
+
+        service.confirmReceipt(DEAL_ID, NARIN);
+
+        verify(paymentClient).confirmReceipt("pay-narin", "narin");
+        assertThat(narin.getStatus()).isEqualTo(ParticipantStatus.RECEIVED);
+        assertThat(narin.getReceivedAt()).isEqualTo(NOW);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.COMPLETED);
+        assertThat(d.getCompletedAt()).isEqualTo(NOW);
+    }
+
+    @Test
+    void confirmReceipt_notTheLast_doesNotPayOutYet() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), narin,
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.HELD));
+
+        service.confirmReceipt(DEAL_ID, NARIN);
+
+        assertThat(narin.getStatus()).isEqualTo(ParticipantStatus.RECEIVED);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.LOCKED);
+        verify(paymentClient, never()).releaseFunds(anyString(), anyString());
+    }
+
+    @Test
+    void confirmReceipt_beforeEveryonePaid_isNotReady() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), narin,
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.RESERVED));
+
+        assertThatThrownBy(() -> service.confirmReceipt(DEAL_ID, NARIN))
+                .isInstanceOfSatisfying(DealStateException.class, e -> assertThat(e.getCode()).isEqualTo("DEAL_NOT_READY"));
+        assertThat(narin.getStatus()).isEqualTo(ParticipantStatus.HELD);
+        verify(paymentClient, never()).confirmReceipt(anyString(), anyString());
+    }
+
+    @Test
+    void confirmReceipt_hostOrOutsider_isForbidden() {
+        givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD));
+
+        assertThatThrownBy(() -> service.confirmReceipt(DEAL_ID, new CurrentUser("host-1", "Ploy S.")))
+                .isInstanceOf(DealPermissionException.class);
+        assertThatThrownBy(() -> service.confirmReceipt(DEAL_ID, new CurrentUser("stranger", "S")))
+                .isInstanceOf(DealPermissionException.class);
+    }
+
+    @Test
+    void confirmReceipt_again_changesNothing() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.RECEIVED);
+        givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID), narin,
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.HELD));
+
+        service.confirmReceipt(DEAL_ID, NARIN);
+
+        verify(paymentClient, never()).confirmReceipt(anyString(), anyString());
+    }
+
+    @Test
+    void confirmReceipt_paymentDown_changesNothing() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), narin);
+        when(paymentClient.confirmReceipt("pay-narin", "narin")).thenThrow(
+                new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
+
+        assertThatThrownBy(() -> service.confirmReceipt(DEAL_ID, NARIN)).isInstanceOf(PaymentServiceException.class);
+        assertThat(narin.getStatus()).isEqualTo(ParticipantStatus.HELD);
+    }
+
+    @Test
+    void confirmReceipt_payoutFails_dealStaysLockedForSch4() {
+        DealParticipant narin = participant("p2", DEAL_ID, "narin", ParticipantStatus.HELD);
+        Deal d = givenDeal(DealStatus.LOCKED, 2, 2, host(DEAL_ID), narin);
+        when(paymentClient.releaseFunds(DEAL_ID, "host-1")).thenThrow(
+                new PaymentServiceException("down", new StatusRuntimeException(Status.UNAVAILABLE)));
+
+        service.confirmReceipt(DEAL_ID, NARIN);
+
+        assertThat(narin.getStatus()).isEqualTo(ParticipantStatus.RECEIVED);
+        assertThat(d.getStatus()).isEqualTo(DealStatus.LOCKED);
+    }
+
+    @Test
+    void retryPayout_onlyWhenEveryoneReceived() {
+        Deal d = givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID),
+                participant("p2", DEAL_ID, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.HELD));
+        assertThat(service.retryPayout(DEAL_ID)).isFalse();
+        verify(paymentClient, never()).releaseFunds(anyString(), anyString());
+
+        givenDeal(DealStatus.LOCKED, 3, 3, host(DEAL_ID),
+                participant("p2", DEAL_ID, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", DEAL_ID, "anya", ParticipantStatus.RECEIVED));
+        assertThat(service.retryPayout(DEAL_ID)).isTrue();
+        verify(paymentClient).releaseFunds(DEAL_ID, "host-1");
     }
 }
