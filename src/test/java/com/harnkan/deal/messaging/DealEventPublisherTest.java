@@ -108,4 +108,60 @@ class DealEventPublisherTest {
         String second = ((DealCreatedEvent) payload.getAllValues().get(1)).eventId();
         assertThat(first).isNotEqualTo(second);
     }
+
+    @Test
+    void publishDealCancelledAndExpired_useTheirRoutingKeysAndCarryParticipantIds() {
+        Deal deal = Deal.builder().id("d1").creatorId("host-1").category("FOOD").dealName("Pizza")
+                .latitude(new BigDecimal("13.7466")).longitude(new BigDecimal("100.5347")).build();
+        DealEventPublisher publisher = new DealEventPublisher(rabbitTemplate);
+
+        publisher.publishDealCancelled(deal, java.util.List.of("u-1", "u-2"));
+        publisher.publishDealExpired(deal, java.util.List.of());
+
+        ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        ArgumentCaptor<MessagePostProcessor> postProcessor = ArgumentCaptor.forClass(MessagePostProcessor.class);
+        verify(rabbitTemplate, org.mockito.Mockito.times(2))
+                .convertAndSend(eq("harnkan.events"), key.capture(), payload.capture(), postProcessor.capture());
+        assertThat(key.getAllValues()).containsExactly("deal.cancelled", "deal.expired");
+
+        DealClosedEvent cancelled = (DealClosedEvent) payload.getAllValues().get(0);
+        assertThat(cancelled.eventType()).isEqualTo("deal.cancelled");
+        assertThat(cancelled.dealId()).isEqualTo("d1");
+        assertThat(cancelled.creatorId()).isEqualTo("host-1");
+        assertThat(cancelled.category()).isEqualTo("FOOD");
+        assertThat(cancelled.shopName()).isEqualTo("Pizza");
+        assertThat(cancelled.lat()).isEqualTo(13.7466);
+        assertThat(cancelled.participantIds()).containsExactly("u-1", "u-2");
+        assertThat(Instant.parse(cancelled.occurredAt())).isBeforeOrEqualTo(Instant.now());
+
+        DealClosedEvent expired = (DealClosedEvent) payload.getAllValues().get(1);
+        assertThat(expired.eventType()).isEqualTo("deal.expired");
+        assertThat(expired.participantIds()).isEmpty();
+        assertThat(expired.eventId()).isNotEqualTo(cancelled.eventId());
+
+        MessageProperties properties = postProcessor.getAllValues().get(0)
+                .postProcessMessage(new Message(new byte[0], new MessageProperties())).getMessageProperties();
+        assertThat(properties.getMessageId()).isEqualTo(cancelled.eventId());
+        assertThat(properties.getType()).isEqualTo("deal.cancelled");
+        assertThat(properties.getDeliveryMode()).isEqualTo(MessageDeliveryMode.PERSISTENT);
+    }
+
+    @Test
+    void jsonConverter_writesDealClosedFieldNamesIncludingParticipantIds() {
+        DealClosedEvent event = new DealClosedEvent("e-2", "deal.cancelled", "2026-10-29T08:00:00Z",
+                "d-1", "c-1", "DRINK", "ชานมไข่มุก", 13.7466, 100.5347, java.util.List.of("u-1", "u-2"));
+
+        Message message = new RabbitMqConfig().jsonMessageConverter().toMessage(event, new MessageProperties());
+        String json = new String(message.getBody(), java.nio.charset.StandardCharsets.UTF_8);
+
+        assertThat(json)
+                .contains("\"eventId\":\"e-2\"")
+                .contains("\"eventType\":\"deal.cancelled\"")
+                .contains("\"dealId\":\"d-1\"")
+                .contains("\"creatorId\":\"c-1\"")
+                .contains("\"category\":\"DRINK\"")
+                .contains("\"shopName\":\"ชานมไข่มุก\"")
+                .contains("\"participantIds\":[\"u-1\",\"u-2\"]");
+    }
 }
