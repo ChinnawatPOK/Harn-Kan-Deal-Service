@@ -39,11 +39,7 @@ spring:
 server:
   port: 8081
 
-auth:
-  mode: ${AUTH_MODE:gateway}
-
 deal:
-  jwt-secret: ${JWT_SECRET:}
   scheduler:
     enabled: true
     interval-ms: 30000

@@ -33,7 +33,7 @@ message Deal {
   double latitude = 10;
   double longitude = 11;
   string expires_at = 12;      // ISO-8601 UTC
-  string status = 13;          // ACTIVE | LOCKED | PURCHASED | COMPLETED | CANCELLED | EXPIRED
+  string status = 13;          // ACTIVE | LOCKED | COMPLETED | CANCELLED | EXPIRED
   string created_at = 14;      // ISO-8601 UTC
   string updated_at = 15;      // ISO-8601 UTC
   string creator_name = 16;

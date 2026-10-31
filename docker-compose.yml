@@ -4,8 +4,8 @@ services:
     build: .
     container_name: harnkan-deal-service
     ports:
-      - "8081:8081"   # REST: DR2-DR7, DR10 (behind the gateway in the full stack)
-      - "9090:9090"   # gRPC: DG1, DG2, DG4, DG5
+      - "8081:8081"
+      - "9090:9090"
     environment:
       SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
       SPRING_DATASOURCE_USERNAME: root
@@ -13,9 +13,6 @@ services:
       PAYMENT_SERVICE_HOST: host.docker.internal
       PAYMENT_SERVICE_PORT: 9091
       PAYMENT_SERVICE_TIMEZONE: ${PAYMENT_SERVICE_TIMEZONE:-UTC}
-      # gateway = trust X-User-Id / X-User-Name from the API gateway; jwt = verify the token here (needs JWT_SECRET)
-      AUTH_MODE: ${AUTH_MODE:-gateway}
-      JWT_SECRET: ${JWT_SECRET:-}
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: harnkan
@@ -46,10 +43,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Message broker shared with Notification Service (exchange harnkan.events).
-  # Management UI: http://localhost:15672 (harnkan / harnkan)
-  # rabbitmq/definitions.json is loaded on every start: user harnkan, exchange harnkan.events,
-  # and queue audit.deal-created (bound to deal.created) so published events can be viewed in the UI.
   rabbitmq:
     image: rabbitmq:4-management
     container_name: harnkan-rabbitmq

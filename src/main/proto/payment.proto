@@ -15,6 +15,12 @@ service PaymentService {
 
   // PG4
   rpc RefundDeal(RefundDealRequest) returns (RefundDealResponse);
+
+  // PG5: HELD -> is_confirmed_receipt = true (repeating it is fine)
+  rpc ConfirmReceipt(ConfirmReceiptRequest) returns (ConfirmReceiptResponse);
+
+  // PG3: every HELD payment confirmed -> payout to the host -> RELEASED
+  rpc ReleaseFunds(ReleaseFundsRequest) returns (ReleaseFundsResponse);
 }
 
 message CreatePaymentRequest {
@@ -51,4 +57,26 @@ message PaymentStatusItem {
   string payment_id = 1;
   string participant_id = 2;
   string status = 3;    // FAILED | REFUND_PENDING | REFUNDED | RELEASED
+}
+
+message ConfirmReceiptRequest {
+  string payment_id = 1;
+  string participant_id = 2;   // must own the payment
+}
+
+message ConfirmReceiptResponse {
+  string payment_id = 1;
+  string status = 2;
+  bool is_confirmed_receipt = 3;
+}
+
+message ReleaseFundsRequest {
+  string deal_id = 1;
+  string creator_id = 2;       // the host who receives the payout
+}
+
+message ReleaseFundsResponse {
+  int32 released_count = 1;    // payments of the deal that are RELEASED (all of them)
+  string total_amount = 2;     // sum of the RELEASED payments, decimal string
+  repeated PaymentStatusItem payments = 3;
 }

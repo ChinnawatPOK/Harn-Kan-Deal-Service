@@ -183,6 +183,21 @@ class DealQueryServiceTest {
     }
 
     @Test
+    void mine_readyToOrderCountsParticipantsWhoAlreadyConfirmedReceipt() {
+        givenMyDeals();
+        DealParticipant myHost = host("c");
+        myHost.setUserId("me");
+        DealParticipant paid = participant("p9", "c", "narin", ParticipantStatus.HELD);
+        DealParticipant received = participant("p10", "c", "anya", ParticipantStatus.RECEIVED);
+        when(participantRepository.findByDealIdIn(anyCollection())).thenReturn(List.of(myHost, paid, received));
+
+        MineItemDto item = service.mine("me", "created", null, null, 0, 20).items().get(0);
+
+        assertThat(item.readyToOrder()).isTrue();
+        assertThat(item.readySlots()).isEqualTo(3);
+    }
+
+    @Test
     void mine_joinedTab() {
         givenMyDeals();
 
@@ -206,5 +221,64 @@ class DealQueryServiceTest {
     void mine_rejectsUnknownTabOrRole() {
         assertThatThrownBy(() -> service.mine("me", "all", null, null, 0, 20)).isInstanceOf(DealValidationException.class);
         assertThatThrownBy(() -> service.mine("me", "joined", null, "BOSS", 0, 20)).isInstanceOf(DealValidationException.class);
+    }
+
+    // --- DR11 receipt ---------------------------------------------------------------------
+
+    private static final String RC_DEAL = "61643f760a9142c9a7918c3d868d9301";
+
+    private void givenCompletedDeal(DealStatus status, DealParticipant... participants) {
+        Deal d = deal(RC_DEAL, status, 3, 3);
+        d.setCompletedAt(NOW);
+        when(dealRepository.findById(RC_DEAL)).thenReturn(Optional.of(d));
+        List<DealParticipant> rows = new java.util.ArrayList<>(List.of(participants));
+        rows.add(host(RC_DEAL));
+        when(participantRepository.findByDealIdOrderByJoinedAtAsc(RC_DEAL)).thenReturn(rows);
+    }
+
+    @Test
+    void receipt_forParticipant_showsTheirShareAndEveryoneWhoPaid() {
+        givenCompletedDeal(DealStatus.COMPLETED,
+                participant("p2", RC_DEAL, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", RC_DEAL, "anya", ParticipantStatus.RECEIVED));
+
+        com.harnkan.deal.dto.ReceiptDto r = service.receipt(RC_DEAL, "narin");
+
+        assertThat(r.receiptNo()).isEqualTo("RC-61643F76-ARIN");
+        assertThat(r.role()).isEqualTo("PARTICIPANT");
+        assertThat(r.amount()).isEqualByComparingTo("189.00");
+        assertThat(r.paymentId()).isEqualTo("pay-narin");
+        assertThat(r.payoutToHost()).isEqualByComparingTo("378.00");
+        assertThat(r.completedAt()).isEqualTo(NOW);
+        assertThat(r.lines()).extracting("name").containsExactly("You", "User anya");
+    }
+
+    @Test
+    void receipt_forHost_showsThePayout() {
+        givenCompletedDeal(DealStatus.COMPLETED,
+                participant("p2", RC_DEAL, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", RC_DEAL, "anya", ParticipantStatus.RECEIVED));
+
+        com.harnkan.deal.dto.ReceiptDto r = service.receipt(RC_DEAL, "host-1");
+
+        assertThat(r.role()).isEqualTo("HOST");
+        assertThat(r.amount()).isEqualByComparingTo("378.00");
+        assertThat(r.paymentId()).isNull();
+        assertThat(r.lines()).hasSize(2);
+    }
+
+    @Test
+    void receipt_onlyForCompletedDeals_andOnlyForTheGroup() {
+        givenCompletedDeal(DealStatus.LOCKED, participant("p2", RC_DEAL, "narin", ParticipantStatus.RECEIVED));
+        assertThatThrownBy(() -> service.receipt(RC_DEAL, "narin"))
+                .isInstanceOf(com.harnkan.deal.exception.DealStateException.class);
+
+        givenCompletedDeal(DealStatus.COMPLETED,
+                participant("p2", RC_DEAL, "narin", ParticipantStatus.RECEIVED),
+                participant("p3", RC_DEAL, "chai", ParticipantStatus.FAILED));
+        assertThatThrownBy(() -> service.receipt(RC_DEAL, "stranger"))
+                .isInstanceOf(com.harnkan.deal.exception.DealPermissionException.class);
+        assertThatThrownBy(() -> service.receipt(RC_DEAL, "chai"))
+                .isInstanceOf(com.harnkan.deal.exception.DealPermissionException.class);
     }
 }

@@ -64,15 +64,19 @@ class DealActionsTest {
     }
 
     @Test
-    void paidParticipant_cannotLeave_andConfirmsReceiptOnlyAfterPurchase() {
+    void paidParticipant_cannotLeave_andConfirmsReceiptOnlyWhenEveryoneHasPaid() {
         DealParticipant me = participant("p", "d", "anya", ParticipantStatus.HELD);
+        DealParticipant stillPaying = participant("p2", "d", "narin", ParticipantStatus.RESERVED);
+        DealParticipant received = participant("p3", "d", "mali", ParticipantStatus.RECEIVED);
 
-        ActionsDto locked = actions(deal("d", DealStatus.LOCKED, 2, 2), me, host("d"), me);
-        ActionsDto purchased = actions(deal("d", DealStatus.PURCHASED, 2, 2), me, host("d"), me);
+        ActionsDto notFull = actions(deal("d", DealStatus.ACTIVE, 2, 3), me, host("d"), me);
+        ActionsDto someoneUnpaid = actions(deal("d", DealStatus.LOCKED, 3, 3), me, host("d"), me, stillPaying);
+        ActionsDto fullyPaid = actions(deal("d", DealStatus.LOCKED, 3, 3), me, host("d"), me, received);
 
-        assertThat(locked.canLeave()).isFalse();
-        assertThat(locked.canConfirmReceipt()).isFalse();
-        assertThat(purchased.canConfirmReceipt()).isTrue();
+        assertThat(fullyPaid.canLeave()).isFalse();
+        assertThat(notFull.canConfirmReceipt()).isFalse();
+        assertThat(someoneUnpaid.canConfirmReceipt()).isFalse();
+        assertThat(fullyPaid.canConfirmReceipt()).isTrue(); // no host "mark purchased" step any more
     }
 
     @Test
@@ -84,24 +88,29 @@ class DealActionsTest {
     }
 
     @Test
-    void host_canCancelWhileOpen_butNotAfterPurchase() {
+    void host_canCancelWhileOpen_untilSomeoneConfirmsReceipt() {
         DealParticipant host = host("d");
+        DealParticipant paid = participant("p2", "d", "narin", ParticipantStatus.HELD);
+        DealParticipant received = participant("p3", "d", "anya", ParticipantStatus.RECEIVED);
 
         assertThat(actions(deal("d", DealStatus.ACTIVE, 1, 4), host, host).canCancel()).isTrue();
-        assertThat(actions(deal("d", DealStatus.LOCKED, 4, 4), host, host).canCancel()).isTrue();
-        assertThat(actions(deal("d", DealStatus.PURCHASED, 4, 4), host, host).canCancel()).isFalse();
+        assertThat(actions(deal("d", DealStatus.LOCKED, 3, 3), host, host, paid, paid).canCancel()).isTrue();
+        assertThat(actions(deal("d", DealStatus.LOCKED, 3, 3), host, host, paid, received).canCancel()).isFalse();
+        assertThat(actions(deal("d", DealStatus.COMPLETED, 3, 3), host, host).canCancel()).isFalse();
         assertThat(actions(deal("d", DealStatus.ACTIVE, 1, 4), host, host).canJoin()).isFalse();
     }
 
     @Test
-    void host_canMarkPurchasedOnlyWhenLockedAndEveryoneHasPaid() {
+    void fullyPaid_needsLockedAndEveryParticipantHeldOrReceived() {
         DealParticipant host = host("d");
         DealParticipant paid = participant("p2", "d", "narin", ParticipantStatus.HELD);
-        DealParticipant waiting = participant("p3", "d", "anya", ParticipantStatus.RESERVED);
+        DealParticipant received = participant("p3", "d", "anya", ParticipantStatus.RECEIVED);
+        DealParticipant waiting = participant("p4", "d", "mali", ParticipantStatus.RESERVED);
+        DealParticipant left = participant("p5", "d", "chai", ParticipantStatus.FAILED);
 
-        assertThat(actions(deal("d", DealStatus.LOCKED, 3, 3), host, host, paid, waiting).canMarkPurchased()).isFalse();
-        assertThat(actions(deal("d", DealStatus.LOCKED, 2, 2), host, host, paid).canMarkPurchased()).isTrue();
-        assertThat(actions(deal("d", DealStatus.ACTIVE, 2, 3), host, host, paid).canMarkPurchased()).isFalse();
+        assertThat(DealActions.fullyPaid(deal("d", DealStatus.LOCKED, 3, 3), List.of(host, paid, received, left))).isTrue();
+        assertThat(DealActions.fullyPaid(deal("d", DealStatus.LOCKED, 3, 3), List.of(host, paid, waiting))).isFalse();
+        assertThat(DealActions.fullyPaid(deal("d", DealStatus.ACTIVE, 2, 3), List.of(host, paid))).isFalse();
     }
 
     @Test
