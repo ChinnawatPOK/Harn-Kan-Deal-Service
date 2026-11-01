@@ -16,6 +16,9 @@ spring:
     properties:
       hibernate:
         format_sql: true
+        # every DATETIME column is UTC
+        jdbc:
+          time_zone: UTC
 
   sql:
     init:
@@ -37,9 +40,10 @@ server:
   port: 8081
 
 deal:
-  jwt-secret: 9768318c34e318158c87bfb9004a71fbcb9badb1056f74b011d485e27bb4e9a8
+  scheduler:
+    enabled: true
+    interval-ms: 30000
 
-# gRPC server exposing DealService (CreateDeal, GetDeal, CancelDeal, ConfirmSlot, ReleaseSlot)
 grpc:
   server:
     port: 9090
@@ -47,5 +51,6 @@ grpc:
 # gRPC client
 payment:
   service:
-    host: localhost
-    port: 9091
+    host: ${PAYMENT_SERVICE_HOST:localhost}
+    port: ${PAYMENT_SERVICE_PORT:9091}
+    timezone: ${PAYMENT_SERVICE_TIMEZONE:UTC}

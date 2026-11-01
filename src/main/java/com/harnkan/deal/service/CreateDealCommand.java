@@ -1,7 +1,7 @@
 package com.harnkan.deal.service;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 import lombok.Builder;
 import lombok.Value;
@@ -10,13 +10,15 @@ import lombok.Value;
 @Builder
 public class CreateDealCommand {
     String creatorId;
-    String shopName;
-    String promotionDetail;
+    String creatorName;
+    String dealName;
+    String details;
     String category;
     String menuImageUrl;
-    BigDecimal pricePerSlot;
-    Integer targetSlots;
+    String pickupLocation;
     BigDecimal latitude;
     BigDecimal longitude;
-    LocalDateTime expiresAt;
+    BigDecimal totalPrice;
+    Integer targetSlots;
+    Instant expiresAt;
 }

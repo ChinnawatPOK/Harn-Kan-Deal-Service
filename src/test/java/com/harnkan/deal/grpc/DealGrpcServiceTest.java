@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +17,7 @@ import com.harnkan.deal.exception.DealNotFoundException;
 import com.harnkan.deal.exception.DealPermissionException;
 import com.harnkan.deal.exception.DealStateException;
 import com.harnkan.deal.exception.DealValidationException;
+import com.harnkan.deal.exception.ParticipantNotFoundException;
 import com.harnkan.deal.service.DealService;
 
 import io.grpc.Status;
@@ -72,10 +73,12 @@ class DealGrpcServiceTest {
         grpcService.createDeal(
                 CreateDealRequest.newBuilder()
                         .setCreatorId("creator-1")
-                        .setShopName("Coffee Corner")
-                        .setPromotionDetail("Buy 1 Get 1")
+                        .setCreatorName("Ploy S.")
+                        .setDealName("Coffee Corner")
+                        .setDetails("Buy 1 Get 1")
                         .setCategory("DRINK")
-                        .setPricePerSlot("49.00")
+                        .setPickupLocation("Ari")
+                        .setTotalPrice("147.00")
                         .setTargetSlots(0)
                         .setExpiresAt("2026-09-30T12:00:00Z")
                         .build(),
@@ -97,17 +100,41 @@ class DealGrpcServiceTest {
     }
 
     @Test
-    void confirmSlot_mapsStateExceptionToFailedPreconditionStatus() {
-        when(dealService.confirmSlot("deal-1")).thenThrow(new DealStateException("Deal is already full"));
+    void cancelDeal_mapsStateExceptionToFailedPreconditionStatus() {
+        when(dealService.cancelDeal("deal-1", "creator-1")).thenThrow(new DealStateException("already cancelled"));
 
         TestObserver<DealResponse> observer = new TestObserver<>();
-        grpcService.confirmSlot(
-                ConfirmSlotRequest.newBuilder().setDealId("deal-1").setParticipantId("user-2").build(), observer);
+        grpcService.cancelDeal(
+                CancelDealRequest.newBuilder().setDealId("deal-1").setRequesterId("creator-1").build(), observer);
 
         assertGrpcStatus(observer, Status.FAILED_PRECONDITION);
     }
 
-    private static void assertGrpcStatus(TestObserver<DealResponse> observer, Status expected) {
+    @Test
+    void updateParticipantPayment_returnsDealStatus() {
+        when(dealService.updateParticipantPayment("deal-1", "user-2", "pay-1", "HELD")).thenReturn(sampleDeal());
+
+        TestObserver<UpdateParticipantPaymentResponse> observer = new TestObserver<>();
+        grpcService.updateParticipantPayment(UpdateParticipantPaymentRequest.newBuilder()
+                .setDealId("deal-1").setParticipantId("user-2").setPaymentId("pay-1").setStatus("HELD").build(), observer);
+
+        assertThat(observer.error).isNull();
+        assertThat(observer.value.getDealStatus()).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void updateParticipantPayment_mapsUnknownParticipantToNotFound() {
+        when(dealService.updateParticipantPayment("deal-1", "ghost", "", "HELD"))
+                .thenThrow(new ParticipantNotFoundException("no such participant"));
+
+        TestObserver<UpdateParticipantPaymentResponse> observer = new TestObserver<>();
+        grpcService.updateParticipantPayment(UpdateParticipantPaymentRequest.newBuilder()
+                .setDealId("deal-1").setParticipantId("ghost").setStatus("HELD").build(), observer);
+
+        assertGrpcStatus(observer, Status.NOT_FOUND);
+    }
+
+    private static void assertGrpcStatus(TestObserver<?> observer, Status expected) {
         assertThat(observer.error).isInstanceOf(StatusRuntimeException.class);
         assertThat(((StatusRuntimeException) observer.error).getStatus().getCode()).isEqualTo(expected.getCode());
     }
@@ -116,18 +143,21 @@ class DealGrpcServiceTest {
         return com.harnkan.deal.domain.Deal.builder()
                 .id("deal-1")
                 .creatorId("creator-1")
-                .shopName("Coffee Corner")
-                .promotionDetail("Buy 1 Get 1")
+                .creatorName("Ploy S.")
+                .dealName("Coffee Corner")
+                .details("Buy 1 Get 1")
                 .category("DRINK")
+                .pickupLocation("Ari")
+                .totalPrice(new BigDecimal("147.00"))
                 .pricePerSlot(new BigDecimal("49.00"))
                 .targetSlots(3)
                 .joinedSlots(1)
                 .latitude(new BigDecimal("13.75630000"))
                 .longitude(new BigDecimal("100.50180000"))
-                .expiresAt(LocalDateTime.now().plusHours(1))
+                .expiresAt(Instant.now().plusSeconds(3600))
                 .status(DealStatus.ACTIVE)
-                .createdAt(LocalDateTime.now())
-                .updatedAt(LocalDateTime.now())
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
                 .build();
     }
 
