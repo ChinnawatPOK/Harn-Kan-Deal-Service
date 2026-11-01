@@ -1,65 +1,28 @@
+# Runs only the Deal Service. MySQL and RabbitMQ come from ../docker-dependencies (start that first).
 services:
 
   deal-service:
     build: .
     container_name: harnkan-deal-service
+    restart: unless-stopped
     ports:
       - "8081:8081"
       - "9090:9090"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/deals?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
       SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: password
-      PAYMENT_SERVICE_HOST: host.docker.internal
-      PAYMENT_SERVICE_PORT: 9091
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-password}
+      PAYMENT_SERVICE_HOST: ${PAYMENT_SERVICE_HOST:-host.docker.internal}
+      PAYMENT_SERVICE_PORT: ${PAYMENT_SERVICE_PORT:-9091}
       PAYMENT_SERVICE_TIMEZONE: ${PAYMENT_SERVICE_TIMEZONE:-UTC}
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
-      RABBITMQ_USER: harnkan
-      RABBITMQ_PASSWORD: harnkan
+      RABBITMQ_USER: ${RABBITMQ_USER:-harnkan}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-harnkan}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      db:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+    networks: [harnkan-net]
 
-  db:
-    image: mysql:8.0
-    container_name: harnkan-deal-db
-    environment:
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: deals
-      TZ: UTC
-    command: --default-time-zone='+00:00'
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  rabbitmq:
-    image: rabbitmq:4-management
-    container_name: harnkan-rabbitmq
-    hostname: harnkan-rabbitmq   # data dir is keyed by node name; keep it stable across recreates
-    ports:
-      - "5672:5672"     # AMQP
-      - "15672:15672"   # Management UI
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-harnkan.conf:ro
-      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  mysql_data:
-  rabbitmq_data:
+networks:
+  harnkan-net:
+    external: true
